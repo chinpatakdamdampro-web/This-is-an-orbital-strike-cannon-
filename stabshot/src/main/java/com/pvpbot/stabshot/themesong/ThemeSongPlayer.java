@@ -15,7 +15,6 @@ import net.minecraft.client.sound.AbstractSoundInstance;
 import net.minecraft.client.sound.AudioStream;
 import net.minecraft.client.sound.OggAudioStream;
 import net.minecraft.client.sound.SoundLoader;
-import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvent;
 import net.minecraft.util.Identifier;
@@ -42,7 +41,7 @@ public class ThemeSongPlayer
 {
     public static final String SONGS_FOLDER = "stabshot/songs";
     private static final Identifier DUMMY_ID = Identifier.of("stabshot", "dummy");
-    private static final RegistryEntry<SoundEvent> DUMMY_SOUND_EVENT = SoundEvent.createUnregisteredEntry(DUMMY_ID);
+    private static final SoundEvent DUMMY_SOUND_EVENT = SoundEvent.of(DUMMY_ID);
 
     private static DiskSoundInstance currentInstance;
     private static String currentSong;
@@ -75,26 +74,26 @@ public class ThemeSongPlayer
             return "§cSong not found: §f" + name + ".ogg §7or §f" + name + ".mp3\n§7Put audio files in: §f" + songsDir + "\n§7Available: §f" + String.join(", ", getSongNames());
         }
         final MinecraftClient client = MinecraftClient.getInstance();
-        if (client == null) {
-            return "Client not ready.";
-        }
+        if (client == null) return "Client not ready.";
+
         final Path fFile = file;
         final String fExt = ext;
         ThemeSongPlayer.currentSong = name;
         ThemeSongPlayer.playing = true;
         ThemeSongPlayer.looping = loop;
+
         if (loop) {
             ThemeSongPlayer.loopActive.set(true);
             (ThemeSongPlayer.loopThread = new Thread(() -> {
                 while (ThemeSongPlayer.loopActive.get()) {
                     long durationMs = estimateDurationMs(fFile, fExt);
                     if (durationMs <= 0L) durationMs = 3000L;
-                    final DiskSoundInstance inst2 = new DiskSoundInstance(fFile, fExt);
+                    final DiskSoundInstance inst = new DiskSoundInstance(fFile, fExt);
                     client.execute(() -> {
                         synchronized (ThemeSongPlayer.class) {
-                            ThemeSongPlayer.currentInstance = inst2;
+                            ThemeSongPlayer.currentInstance = inst;
                         }
-                        client.getSoundManager().play(inst2);
+                        client.getSoundManager().play(inst);
                     });
                     try {
                         Thread.sleep(durationMs);
@@ -121,19 +120,13 @@ public class ThemeSongPlayer
                     client.getSoundManager().play(inst);
                 } catch (final Exception e4) {
                     ThemeSongPlayer.playing = false;
-                    if (client.inGameHud != null) {
-                        client.inGameHud.getChatHud().addMessage(net.minecraft.text.Text.literal("§c[StabShot] Play error: " + e4.getMessage()));
-                    }
                 }
             });
         }
         return null;
     }
 
-    /**
-     * Used by SpotifyPlayer to play a cached preview MP3
-     * through the same DiskSoundInstance / JLayer pipeline.
-     */
+    /** Used by SpotifyPlayer to play a cached preview MP3 through the same pipeline. */
     public static void playFile(final Path mp3File) {
         final MinecraftClient client = MinecraftClient.getInstance();
         if (client == null) return;
@@ -160,10 +153,10 @@ public class ThemeSongPlayer
                     bs.closeFrame();
                     bs.close();
                     if (bitrate <= 0) return 0L;
-                    final long fileSize = Files.size(file);
-                    return fileSize * 8000L / bitrate;
+                    return Files.size(file) * 8000L / bitrate;
                 }
             }
+            // OGG — estimate via sample rate
             try (final InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
                 final OggAudioStream ogg = new OggAudioStream(in);
                 final AudioFormat fmt = ogg.getFormat();
@@ -171,7 +164,7 @@ public class ThemeSongPlayer
                 final int ch = fmt.getChannels();
                 long totalBytes = 0L;
                 ByteBuffer buf;
-                while ((buf = ogg.getBuffer(8192)) != null && buf.remaining() > 0) {
+                while ((buf = ogg.read(8192)) != null && buf.remaining() > 0) {
                     totalBytes += buf.remaining();
                 }
                 ogg.close();
@@ -263,12 +256,12 @@ public class ThemeSongPlayer
     static class Mp3AudioStream implements AudioStream
     {
         private final Bitstream bitstream;
-        private final Decoder decoder;
+        private final Decoder   decoder;
         private byte[] overflowBytes = new byte[0];
-        private int overflowPos = 0;
-        private int sampleRate = 44100;
-        private int channels = 2;
-        private boolean headerRead = false;
+        private int    overflowPos   = 0;
+        private int    sampleRate    = 44100;
+        private int    channels      = 2;
+        private boolean headerRead   = false;
 
         Mp3AudioStream(final InputStream in) {
             this.bitstream = new Bitstream(in);
@@ -276,7 +269,7 @@ public class ThemeSongPlayer
         }
 
         @Override
-        public ByteBuffer getBuffer(final int size) throws IOException {
+        public ByteBuffer read(final int size) throws IOException {
             while (this.overflowBytes.length - this.overflowPos < size && this.decodeNextFrame()) {}
             final int available = this.overflowBytes.length - this.overflowPos;
             if (available <= 0) return ByteBuffer.allocateDirect(0);
@@ -300,14 +293,14 @@ public class ThemeSongPlayer
                 final SampleBuffer output = (SampleBuffer) this.decoder.decodeFrame(header, this.bitstream);
                 this.bitstream.closeFrame();
                 final short[] samples = output.getBuffer();
-                final int count = output.getBufferLength();
-                final int remaining = this.overflowBytes.length - this.overflowPos;
-                final byte[] newBuf = new byte[remaining + count * 2];
+                final int     count   = output.getBufferLength();
+                final int     remaining = this.overflowBytes.length - this.overflowPos;
+                final byte[]  newBuf  = new byte[remaining + count * 2];
                 if (remaining > 0) System.arraycopy(this.overflowBytes, this.overflowPos, newBuf, 0, remaining);
                 int off = remaining;
-                for (final short s : samples) {
-                    newBuf[off++] = (byte)(s & 0xFF);
-                    newBuf[off++] = (byte)(s >> 8 & 0xFF);
+                for (int i = 0; i < count; i++) {
+                    newBuf[off++] = (byte)(samples[i] & 0xFF);
+                    newBuf[off++] = (byte)(samples[i] >> 8 & 0xFF);
                 }
                 this.overflowBytes = newBuf;
                 this.overflowPos   = 0;
