@@ -9,11 +9,10 @@ import net.fabricmc.api.Environment;
 @Environment(EnvType.CLIENT)
 public class StabShotClient implements ClientModInitializer
 {
+    @Override
     public void onInitializeClient() {
         ThemeSongCommand.register();
 
-        // Start the Spotify web server (port 7891) so the player page
-        // is ready as soon as the user logs in
         try {
             SpotifyWebServer.getInstance().start();
         } catch (Exception e) {
