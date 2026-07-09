@@ -7,6 +7,7 @@ import org.schabi.newpipe.extractor.downloader.Request;
 import org.schabi.newpipe.extractor.downloader.Response;
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -14,11 +15,6 @@ import java.net.http.HttpResponse;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Provides NewPipe Extractor with an HTTP implementation backed by
- * Java's built-in {@code java.net.http.HttpClient}.
- * Works on PC and PojavLauncher (Android ships HttpClient via Minecraft's JVM shim).
- */
 @Environment(EnvType.CLIENT)
 public class YtDownloader extends Downloader {
 
@@ -32,12 +28,11 @@ public class YtDownloader extends Downloader {
             "Chrome/120.0.0.0 Safari/537.36";
 
     @Override
-    public Response execute(Request request) throws ReCaptchaException, java.io.IOException, InterruptedException {
+    public Response execute(Request request) throws ReCaptchaException, IOException {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(request.url()))
                 .header("User-Agent", USER_AGENT);
 
-        // Copy headers from NewPipe request
         if (request.headers() != null) {
             for (Map.Entry<String, List<String>> entry : request.headers().entrySet()) {
                 for (String value : entry.getValue()) {
@@ -46,7 +41,6 @@ public class YtDownloader extends Downloader {
             }
         }
 
-        // Method
         String method = request.httpMethod();
         if ("POST".equals(method) && request.dataToSend() != null) {
             builder.POST(HttpRequest.BodyPublishers.ofByteArray(request.dataToSend()));
@@ -54,7 +48,13 @@ public class YtDownloader extends Downloader {
             builder.GET();
         }
 
-        HttpResponse<String> response = HTTP.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response;
+        try {
+            response = HTTP.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("HTTP request interrupted", e);
+        }
 
         if (response.statusCode() == 429) {
             throw new ReCaptchaException("Rate limited by YouTube", request.url());
