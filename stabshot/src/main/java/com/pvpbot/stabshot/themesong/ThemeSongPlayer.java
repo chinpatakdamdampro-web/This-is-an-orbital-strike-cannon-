@@ -6,21 +6,20 @@ import javazoom.jl.decoder.Decoder;
 import javazoom.jl.decoder.Header;
 import javazoom.jl.decoder.Bitstream;
 import javazoom.jl.decoder.SampleBuffer;
-import net.minecraft.class_4234;
-import net.minecraft.class_4237;
-import net.minecraft.class_5819;
-import net.minecraft.class_4228;
-import net.minecraft.class_3419;
-import net.minecraft.class_1102;
-import net.minecraft.class_1113;
-import net.minecraft.class_2561;
-import net.minecraft.class_2960;
-import net.minecraft.class_310;
-import net.minecraft.class_3414;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.sound.v1.FabricSoundInstance;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.sound.AbstractSoundInstance;
+import net.minecraft.client.sound.AudioStream;
+import net.minecraft.client.sound.OggAudioStream;
+import net.minecraft.client.sound.SoundLoader;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.sound.SoundCategory;
+import net.minecraft.sound.SoundEvent;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.math.random.Random;
 
 import javax.sound.sampled.AudioFormat;
 import java.io.BufferedInputStream;
@@ -30,7 +29,6 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
-import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileAttribute;
 import java.util.ArrayList;
@@ -43,14 +41,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class ThemeSongPlayer
 {
     public static final String SONGS_FOLDER = "stabshot/songs";
-    private static final class_2960 DUMMY_ID;
-    private static final class_3414 DUMMY_SOUND_EVENT;
+    private static final Identifier DUMMY_ID = Identifier.of("stabshot", "dummy");
+    private static final RegistryEntry<SoundEvent> DUMMY_SOUND_EVENT = SoundEvent.createUnregisteredEntry(DUMMY_ID);
+
     private static DiskSoundInstance currentInstance;
     private static String currentSong;
     private static boolean playing;
     private static boolean looping;
     private static Thread loopThread;
-    private static AtomicBoolean loopActive;
+    private static final AtomicBoolean loopActive = new AtomicBoolean(false);
 
     public static String play(final String name, final boolean loop) {
         stop();
@@ -64,9 +63,7 @@ public class ThemeSongPlayer
         }
         Path file = null;
         String ext = null;
-        final String[] array = { "ogg", "mp3" };
-        for (int length = array.length, i = 0; i < length; ++i) {
-            final String e2 = array[i];
+        for (final String e2 : new String[]{ "ogg", "mp3" }) {
             final Path candidate = songsDir.resolve(name + "." + e2);
             if (Files.exists(candidate, new LinkOption[0])) {
                 file = candidate;
@@ -77,7 +74,7 @@ public class ThemeSongPlayer
         if (file == null) {
             return "§cSong not found: §f" + name + ".ogg §7or §f" + name + ".mp3\n§7Put audio files in: §f" + songsDir + "\n§7Available: §f" + String.join(", ", getSongNames());
         }
-        final class_310 client = class_310.method_1551();
+        final MinecraftClient client = MinecraftClient.getInstance();
         if (client == null) {
             return "Client not ready.";
         }
@@ -88,19 +85,16 @@ public class ThemeSongPlayer
         ThemeSongPlayer.looping = loop;
         if (loop) {
             ThemeSongPlayer.loopActive.set(true);
-            final DiskSoundInstance inst;
             (ThemeSongPlayer.loopThread = new Thread(() -> {
                 while (ThemeSongPlayer.loopActive.get()) {
                     long durationMs = estimateDurationMs(fFile, fExt);
-                    if (durationMs <= 0L) {
-                        durationMs = 3000L;
-                    }
+                    if (durationMs <= 0L) durationMs = 3000L;
                     final DiskSoundInstance inst2 = new DiskSoundInstance(fFile, fExt);
                     client.execute(() -> {
                         synchronized (ThemeSongPlayer.class) {
                             ThemeSongPlayer.currentInstance = inst2;
                         }
-                        client.method_1483().method_4873((class_1113) inst2);
+                        client.getSoundManager().play(inst2);
                     });
                     try {
                         Thread.sleep(durationMs);
@@ -110,7 +104,7 @@ public class ThemeSongPlayer
                     client.execute(() -> {
                         synchronized (ThemeSongPlayer.class) {
                             if (ThemeSongPlayer.currentInstance != null) {
-                                client.method_1483().method_4870((class_1113) ThemeSongPlayer.currentInstance);
+                                client.getSoundManager().stop(ThemeSongPlayer.currentInstance);
                             }
                         }
                     });
@@ -124,11 +118,11 @@ public class ThemeSongPlayer
                     synchronized (ThemeSongPlayer.class) {
                         ThemeSongPlayer.currentInstance = inst;
                     }
-                    client.method_1483().method_4873((class_1113) inst);
+                    client.getSoundManager().play(inst);
                 } catch (final Exception e4) {
                     ThemeSongPlayer.playing = false;
-                    if (client.field_1724 != null) {
-                        client.field_1724.method_7353((class_2561) class_2561.method_43470("§c[StabShot] Play error: " + e4.getMessage()), false);
+                    if (client.inGameHud != null) {
+                        client.inGameHud.getChatHud().addMessage(net.minecraft.text.Text.literal("§c[StabShot] Play error: " + e4.getMessage()));
                     }
                 }
             });
@@ -137,34 +131,31 @@ public class ThemeSongPlayer
     }
 
     /**
-     * NEW — used by SpotifyPlayer to play a cached Spotify preview MP3
+     * Used by SpotifyPlayer to play a cached preview MP3
      * through the same DiskSoundInstance / JLayer pipeline.
      */
     public static void playFile(final Path mp3File) {
-        final class_310 client = class_310.method_1551();
+        final MinecraftClient client = MinecraftClient.getInstance();
         if (client == null) return;
         final DiskSoundInstance inst = new DiskSoundInstance(mp3File, "mp3");
         client.execute(() -> {
             synchronized (ThemeSongPlayer.class) {
                 if (ThemeSongPlayer.currentInstance != null) {
-                    client.method_1483().method_4870((class_1113) ThemeSongPlayer.currentInstance);
+                    client.getSoundManager().stop(ThemeSongPlayer.currentInstance);
                 }
                 ThemeSongPlayer.currentInstance = inst;
             }
-            client.method_1483().method_4873((class_1113) inst);
+            client.getSoundManager().play(inst);
         });
     }
 
     private static long estimateDurationMs(final Path file, final String ext) {
         try {
             if (ext.equals("mp3")) {
-                try (final InputStream in = new BufferedInputStream(Files.newInputStream(file, new OpenOption[0]))) {
+                try (final InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
                     final Bitstream bs = new Bitstream(in);
                     final Header first = bs.readFrame();
-                    if (first == null) {
-                        bs.close();
-                        return 0L;
-                    }
+                    if (first == null) { bs.close(); return 0L; }
                     final int bitrate = first.bitrate();
                     bs.closeFrame();
                     bs.close();
@@ -173,14 +164,14 @@ public class ThemeSongPlayer
                     return fileSize * 8000L / bitrate;
                 }
             }
-            try (final InputStream in = new BufferedInputStream(Files.newInputStream(file, new OpenOption[0]))) {
-                final class_4228 ogg = new class_4228(in);
-                final AudioFormat fmt = ogg.method_19719();
+            try (final InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
+                final OggAudioStream ogg = new OggAudioStream(in);
+                final AudioFormat fmt = ogg.getFormat();
                 final int sr = (int) fmt.getSampleRate();
                 final int ch = fmt.getChannels();
                 long totalBytes = 0L;
                 ByteBuffer buf;
-                while ((buf = ogg.method_19720(8192)) != null && buf.remaining() > 0) {
+                while ((buf = ogg.getBuffer(8192)) != null && buf.remaining() > 0) {
                     totalBytes += buf.remaining();
                 }
                 ogg.close();
@@ -199,10 +190,10 @@ public class ThemeSongPlayer
             ThemeSongPlayer.loopThread = null;
         }
         if (ThemeSongPlayer.currentInstance != null) {
-            final class_310 client = class_310.method_1551();
+            final MinecraftClient client = MinecraftClient.getInstance();
             if (client != null) {
                 final DiskSoundInstance inst = ThemeSongPlayer.currentInstance;
-                client.execute(() -> client.method_1483().method_4870((class_1113) inst));
+                client.execute(() -> client.getSoundManager().stop(inst));
             }
             ThemeSongPlayer.currentInstance = null;
         }
@@ -214,9 +205,7 @@ public class ThemeSongPlayer
     public static List<String> getSongNames() {
         final List<String> names = new ArrayList<>();
         final Path dir = getSongsDir();
-        if (!Files.exists(dir, new LinkOption[0])) {
-            return names;
-        }
+        if (!Files.exists(dir, new LinkOption[0])) return names;
         final File[] files = dir.toFile().listFiles(f -> {
             if (!f.isFile()) return false;
             final String n2 = f.getName().toLowerCase();
@@ -225,7 +214,7 @@ public class ThemeSongPlayer
         if (files == null) return names;
         for (final File f : files) {
             final String n = f.getName();
-            final int dot = n.lastIndexOf(46);
+            final int dot = n.lastIndexOf('.');
             names.add((dot > 0) ? n.substring(0, dot) : n);
         }
         Collections.sort(names);
@@ -240,39 +229,29 @@ public class ThemeSongPlayer
         return FabricLoader.getInstance().getConfigDir().resolve("stabshot/songs");
     }
 
-    static {
-        DUMMY_ID = class_2960.method_60655("stabshot", "dummy");
-        DUMMY_SOUND_EVENT = class_3414.method_47908(ThemeSongPlayer.DUMMY_ID);
-        ThemeSongPlayer.currentInstance = null;
-        ThemeSongPlayer.currentSong = null;
-        ThemeSongPlayer.playing = false;
-        ThemeSongPlayer.looping = false;
-        ThemeSongPlayer.loopThread = null;
-        ThemeSongPlayer.loopActive = new AtomicBoolean(false);
-    }
-
     @Environment(EnvType.CLIENT)
-    static class DiskSoundInstance extends class_1102 implements FabricSoundInstance
+    static class DiskSoundInstance extends AbstractSoundInstance implements FabricSoundInstance
     {
         private final Path filePath;
         private final String ext;
 
         DiskSoundInstance(final Path filePath, final String ext) {
-            super(ThemeSongPlayer.DUMMY_SOUND_EVENT, class_3419.field_15250, class_5819.method_43047());
+            super(DUMMY_SOUND_EVENT, SoundCategory.MUSIC, Random.create());
             this.filePath = filePath;
             this.ext = ext;
-            this.field_5442 = 1.0f;
-            this.field_5441 = 1.0f;
-            this.field_5446 = false;
-            this.field_5451 = 0;
-            this.field_18936 = true;
-            this.field_5440 = class_1113.class_1114.field_5478;
+            this.volume = 1.0f;
+            this.pitch  = 1.0f;
+            this.repeat = false;
+            this.repeatDelay = 0;
+            this.relative = true;
+            this.attenuationType = net.minecraft.client.sound.SoundInstance.AttenuationType.NONE;
         }
 
-        public CompletableFuture<class_4234> getAudioStream(final class_4237 loader, final class_2960 id, final boolean repeatInstantly) {
+        @Override
+        public CompletableFuture<AudioStream> getAudioStream(SoundLoader loader, Identifier id, boolean repeatInstantly) {
             try {
-                final InputStream in = new BufferedInputStream(Files.newInputStream(this.filePath, new OpenOption[0]));
-                final class_4234 stream = (class_4234) (this.ext.equals("mp3") ? new Mp3AudioStream(in) : new class_4228(in));
+                final InputStream in = new BufferedInputStream(Files.newInputStream(this.filePath));
+                final AudioStream stream = this.ext.equals("mp3") ? new Mp3AudioStream(in) : new OggAudioStream(in);
                 return CompletableFuture.completedFuture(stream);
             } catch (final IOException e) {
                 return CompletableFuture.failedFuture(new RuntimeException("StabShot: can't open audio: " + this.filePath + " — " + e.getMessage(), e));
@@ -281,32 +260,26 @@ public class ThemeSongPlayer
     }
 
     @Environment(EnvType.CLIENT)
-    static class Mp3AudioStream implements class_4234
+    static class Mp3AudioStream implements AudioStream
     {
         private final Bitstream bitstream;
         private final Decoder decoder;
-        private byte[] overflowBytes;
-        private int overflowPos;
-        private int sampleRate;
-        private int channels;
-        private boolean headerRead;
+        private byte[] overflowBytes = new byte[0];
+        private int overflowPos = 0;
+        private int sampleRate = 44100;
+        private int channels = 2;
+        private boolean headerRead = false;
 
         Mp3AudioStream(final InputStream in) {
-            this.overflowBytes = new byte[0];
-            this.overflowPos = 0;
-            this.sampleRate = 44100;
-            this.channels = 2;
-            this.headerRead = false;
             this.bitstream = new Bitstream(in);
-            this.decoder = new Decoder();
+            this.decoder   = new Decoder();
         }
 
-        public ByteBuffer method_19720(final int size) throws IOException {
+        @Override
+        public ByteBuffer getBuffer(final int size) throws IOException {
             while (this.overflowBytes.length - this.overflowPos < size && this.decodeNextFrame()) {}
             final int available = this.overflowBytes.length - this.overflowPos;
-            if (available <= 0) {
-                return ByteBuffer.allocateDirect(0);
-            }
+            if (available <= 0) return ByteBuffer.allocateDirect(0);
             final int toReturn = Math.min(size, available);
             final ByteBuffer buf = ByteBuffer.allocateDirect(toReturn);
             buf.put(this.overflowBytes, this.overflowPos, toReturn);
@@ -321,7 +294,7 @@ public class ThemeSongPlayer
                 if (header == null) return false;
                 if (!this.headerRead) {
                     this.sampleRate = header.frequency();
-                    this.channels = (header.mode() == 3) ? 1 : 2;
+                    this.channels   = (header.mode() == 3) ? 1 : 2;
                     this.headerRead = true;
                 }
                 final SampleBuffer output = (SampleBuffer) this.decoder.decodeFrame(header, this.bitstream);
@@ -330,16 +303,14 @@ public class ThemeSongPlayer
                 final int count = output.getBufferLength();
                 final int remaining = this.overflowBytes.length - this.overflowPos;
                 final byte[] newBuf = new byte[remaining + count * 2];
-                if (remaining > 0) {
-                    System.arraycopy(this.overflowBytes, this.overflowPos, newBuf, 0, remaining);
-                }
+                if (remaining > 0) System.arraycopy(this.overflowBytes, this.overflowPos, newBuf, 0, remaining);
                 int off = remaining;
                 for (final short s : samples) {
-                    newBuf[off++] = (byte) (s & 0xFF);
-                    newBuf[off++] = (byte) (s >> 8 & 0xFF);
+                    newBuf[off++] = (byte)(s & 0xFF);
+                    newBuf[off++] = (byte)(s >> 8 & 0xFF);
                 }
                 this.overflowBytes = newBuf;
-                this.overflowPos = 0;
+                this.overflowPos   = 0;
                 return true;
             } catch (final BitstreamException e) {
                 if (e.getErrorCode() == 260) return false;
@@ -349,15 +320,16 @@ public class ThemeSongPlayer
             }
         }
 
-        public AudioFormat method_19719() {
-            final int frameSize = this.channels * 2;
-            return new AudioFormat(AudioFormat.Encoding.PCM_SIGNED, (float) this.sampleRate, 16, this.channels, frameSize, (float) this.sampleRate, false);
+        @Override
+        public AudioFormat getFormat() {
+            return new AudioFormat(AudioFormat.Encoding.PCM_SIGNED,
+                    (float) this.sampleRate, 16, this.channels,
+                    this.channels * 2, (float) this.sampleRate, false);
         }
 
+        @Override
         public void close() throws IOException {
-            try {
-                this.bitstream.close();
-            } catch (final BitstreamException ex) {}
+            try { this.bitstream.close(); } catch (final BitstreamException ignored) {}
         }
     }
 }
