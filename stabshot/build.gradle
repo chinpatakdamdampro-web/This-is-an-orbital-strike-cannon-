@@ -4,7 +4,7 @@ plugins {
 }
 
 version = project.mod_version
-group = project.maven_group
+group   = project.maven_group
 
 base {
     archivesName = project.archives_base_name
@@ -13,16 +13,35 @@ base {
 repositories {
     maven { url 'https://maven.fabricmc.net/' }
     mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+configurations {
+    shade
 }
 
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    mappings  "net.fabricmc:yarn:${project.yarn_mappings}:v2"
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    // JLayer — MP3 decoding for ThemeSongPlayer
-    implementation include('javazoom:jlayer:1.0.1')
+    // JLayer — MP3 decoding for ThemeSongPlayer and YouTube streaming
+    shade('javazoom:jlayer:1.0.1')
+    implementation('javazoom:jlayer:1.0.1')
+
+    // NewPipe Extractor — gets direct audio stream URLs from YouTube (no API key)
+    shade('com.github.TeamNewPipe:NewPipeExtractor:v0.24.2')
+    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.2')
+}
+
+// Bundle shaded deps into the jar
+jar {
+    from {
+        configurations.shade.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from("LICENSE") { rename { "${it}_${project.archives_base_name}" } }
 }
 
 processResources {
