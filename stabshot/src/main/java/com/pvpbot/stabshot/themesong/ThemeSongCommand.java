@@ -4,7 +4,7 @@ import com.mojang.brigadier.arguments.ArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
-import com.pvpbot.stabshot.spotify.SpotifyCommand;
+import com.pvpbot.stabshot.youtube.YtCommand;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
@@ -19,7 +19,8 @@ public class ThemeSongCommand
 {
     public static void register() {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
-            // Original /ts play / stop / list commands
+
+            // /ts play [loop] <name>  /ts stop  /ts list
             dispatcher.register(
                 (LiteralArgumentBuilder) ((LiteralArgumentBuilder) ((LiteralArgumentBuilder)
                     ClientCommandManager.literal("ts")
@@ -33,14 +34,14 @@ public class ThemeSongCommand
                     .then(ClientCommandManager.literal("list").executes(ThemeSongCommand::execList))
             );
 
-            // Spotify integration — /ts spotify ...
-            SpotifyCommand.register(dispatcher);
+            // /ts yt ...
+            YtCommand.register(dispatcher);
         });
     }
 
     private static int execPlay(final CommandContext<FabricClientCommandSource> ctx, final boolean loop) {
         final String song = StringArgumentType.getString(ctx, "song");
-        final String err = ThemeSongPlayer.play(song, loop);
+        final String err  = ThemeSongPlayer.play(song, loop);
         if (err != null) {
             ctx.getSource().sendFeedback(Text.literal("§c✘ " + err));
         } else {
@@ -55,7 +56,7 @@ public class ThemeSongCommand
             ctx.getSource().sendFeedback(Text.literal("§7No song is currently playing."));
             return 0;
         }
-        final String was = ThemeSongPlayer.getCurrentSong();
+        final String was       = ThemeSongPlayer.getCurrentSong();
         final boolean wasLooping = ThemeSongPlayer.isLooping();
         ThemeSongPlayer.stop();
         ctx.getSource().sendFeedback(Text.literal("§7■ Stopped: §f" + was + (wasLooping ? " §7(was looping)" : "")));
