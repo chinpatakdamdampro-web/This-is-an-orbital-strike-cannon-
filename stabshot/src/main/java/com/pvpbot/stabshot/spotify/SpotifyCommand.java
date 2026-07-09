@@ -8,23 +8,11 @@ import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.text.ClickEvent;
+import net.minecraft.text.MutableText;
+import net.minecraft.text.Style;
 import net.minecraft.text.Text;
 
-/**
- * Registers all /ts spotify subcommands.
- *
- *   /ts spotify login           – OAuth login, then opens player page
- *   /ts spotify open            – open the player page in browser
- *   /ts spotify play <query>    – search and play
- *   /ts spotify uri <uri>       – play by Spotify URI or URL
- *   /ts spotify pause           – pause
- *   /ts spotify resume          – resume
- *   /ts spotify next            – next track
- *   /ts spotify prev            – previous track
- *   /ts spotify stop            – stop
- *   /ts spotify status          – show what's playing
- *   /ts spotify url             – (PojavLauncher) re-print login/player URL
- */
 @Environment(EnvType.CLIENT)
 public class SpotifyCommand {
 
@@ -79,7 +67,6 @@ public class SpotifyCommand {
         var src  = ctx.getSource();
         var auth = SpotifyAuth.getInstance();
 
-        // Try restoring saved tokens first
         if (auth.loadTokens(FabricLoader.getInstance().getConfigDir())) {
             feedback(src, "§a[Spotify] Already logged in! Opening player...");
             openPlayerAndNotify(src);
@@ -113,17 +100,15 @@ public class SpotifyCommand {
 
     private static int execUrl(CommandContext<FabricClientCommandSource> ctx) {
         var src = ctx.getSource();
-        // First check if there's a pending auth URL
         String authUrl = SpotifyState.consumePendingAuthUrl();
         if (authUrl != null) {
-            feedback(src, "§e[Spotify] Login URL:");
-            feedback(src, "§b" + authUrl);
+            feedback(src, "§e[Spotify] Click to open login page:");
+            feedbackUrl(src, authUrl);
             return 1;
         }
-        // Otherwise give the player page URL
         if (SpotifyAuth.getInstance().isAuthenticated()) {
-            feedback(src, "§e[Spotify] Player URL:");
-            feedback(src, "§bhttp://127.0.0.1:" + SpotifyWebServer.PORT + "/player");
+            feedback(src, "§e[Spotify] Click to open player:");
+            feedbackUrl(src, "http://127.0.0.1:" + SpotifyWebServer.PORT + "/player");
         } else {
             feedback(src, "§7[Spotify] Not logged in. Run §b/ts spotify login §7first.");
         }
@@ -149,7 +134,6 @@ public class SpotifyCommand {
         var uri = StringArgumentType.getString(ctx, "uri");
         if (!checkAuth(src)) return 0;
 
-        // Convert share URL to URI if needed
         String spotifyUri = toSpotifyUri(uri);
         String result = SpotifyPlayer.getInstance().play(spotifyUri);
         feedback(src, "§a" + result);
@@ -192,8 +176,19 @@ public class SpotifyCommand {
 
     private static void openPlayerAndNotify(FabricClientCommandSource src) {
         SpotifyPlayer.getInstance().openPlayer();
-        feedback(src, "§7Player page: §bhttp://127.0.0.1:" + SpotifyWebServer.PORT + "/player");
-        feedback(src, "§7Use §f/ts spotify play <song> §7to play music from Minecraft.");
+        String url = "http://127.0.0.1:" + SpotifyWebServer.PORT + "/player";
+        feedback(src, "§7Click to open the Spotify player:");
+        feedbackUrl(src, url);
+        feedback(src, "§7Use §f/ts spotify play <song> §7to control playback from Minecraft.");
+    }
+
+    /** Sends a clickable URL in chat — clicking it opens the URL in the browser. */
+    private static void feedbackUrl(FabricClientCommandSource src, String url) {
+        MutableText text = Text.literal("§b§n" + url)
+                .setStyle(Style.EMPTY
+                        .withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_URL, url))
+                        .withUnderline(true));
+        src.sendFeedback(text);
     }
 
     private static boolean checkAuth(FabricClientCommandSource src) {
@@ -205,12 +200,11 @@ public class SpotifyCommand {
     }
 
     private static String toSpotifyUri(String input) {
-        // https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT → spotify:track:4cOd...
         if (input.contains("open.spotify.com/")) {
             String[] parts = input.split("open.spotify.com/")[1].split("\\?")[0].split("/");
             if (parts.length >= 2) return "spotify:" + parts[0] + ":" + parts[1];
         }
-        return input; // already a URI or bare ID
+        return input;
     }
 
     private static void feedback(FabricClientCommandSource src, String msg) {
