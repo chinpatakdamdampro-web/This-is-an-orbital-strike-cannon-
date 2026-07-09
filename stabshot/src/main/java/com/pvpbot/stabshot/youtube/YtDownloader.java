@@ -32,7 +32,7 @@ public class YtDownloader extends Downloader {
             "Chrome/120.0.0.0 Safari/537.36";
 
     @Override
-    public Response execute(Request request) throws ReCaptchaException, java.io.IOException, java.io.InterruptedException {
+    public Response execute(Request request) throws ReCaptchaException, java.io.IOException, InterruptedException {
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(request.url()))
                 .header("User-Agent", USER_AGENT);
