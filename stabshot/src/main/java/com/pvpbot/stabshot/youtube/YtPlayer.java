@@ -188,7 +188,7 @@ public class YtPlayer {
      * reuse a stale URL, always get a new one from a fresh extractor.
      */
     private String resolveAudioUrl(String videoUrl) throws Exception {
-        // Fresh init every call to avoid stale extractor state
+        // Always fresh init — stale extractor state causes "page needs to be reloaded"
         NewPipe.init(new YtDownloader());
 
         StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, videoUrl);
@@ -198,22 +198,43 @@ public class YtPlayer {
             throw new IOException("No audio streams found for: " + videoUrl);
         }
 
-        // Lowest bitrate = least data used on mobile
-        AudioStream best = streams.stream()
+        // Sort by bitrate ascending (least data on mobile), filter out empty URLs
+        List<AudioStream> sorted = streams.stream()
                 .filter(s -> {
-                    try { return s.getBitrate() > 0; } catch (Exception e) { return false; }
+                    try { return s.getContent() != null && !s.getContent().isBlank(); }
+                    catch (Exception e) { return false; }
                 })
-                .min(Comparator.comparingInt(s -> {
+                .sorted(Comparator.comparingInt(s -> {
                     try { return s.getBitrate(); } catch (Exception e) { return Integer.MAX_VALUE; }
                 }))
-                .orElse(streams.get(0));
+                .toList();
 
-        String url = best.getContent();
-        if (url == null || url.isBlank()) {
-            throw new IOException("Stream URL was empty — YouTube may have changed their API.");
+        if (sorted.isEmpty()) {
+            throw new IOException("All stream URLs were empty. YouTube may have blocked extraction.");
         }
-        return url;
+
+        // Verify URL is reachable with HEAD request — skip dead URLs
+        HttpClient http = HttpClient.newHttpClient();
+        for (AudioStream stream : sorted) {
+            String url = stream.getContent();
+            try {
+                HttpRequest head = HttpRequest.newBuilder()
+                        .uri(URI.create(url))
+                        .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                        .header("User-Agent", "Mozilla/5.0")
+                        .build();
+                HttpResponse<Void> resp = http.send(head, HttpResponse.BodyHandlers.discarding());
+                if (resp.statusCode() < 400) return url;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while verifying stream URL", e);
+            } catch (Exception ignored) {}
+        }
+
+        // Fallback — return first URL anyway
+        return sorted.get(0).getContent();
     }
+
 
     private static void downloadToFile(String url, Path dest) throws Exception {
         HttpClient http = HttpClient.newHttpClient();
