@@ -2,11 +2,6 @@ name: Build StabShot 1.21.1
 
 # Run on every push to main or any tag, and allow manual triggers.
 on:
-  push:
-    branches: [ "main" ]
-    tags:     [ "v*" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
     inputs:
       version:
