@@ -11,6 +11,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -31,9 +33,14 @@ jobs:
         working-directory: stabshot
         run: gradle build --no-daemon --no-build-cache
 
-      - name: Upload built jar
-        uses: actions/upload-artifact@v4
+      - name: Rename jar
+        run: |
+          JAR=$(ls stabshot/build/libs/stabshot-*.jar | grep -v sources)
+          mv "$JAR" "stabshot/build/libs/VulgarsOSC-${{ github.event.inputs.version }}-1.21.1.jar"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: "Vulgar's OSC ${{ github.event.inputs.version }} (1.21.1)"
-          path: stabshot/build/libs/stabshot-*.jar
-          if-no-files-found: error
+          tag_name: "${{ github.event.inputs.version }}"
+          name: "Vulgar's OSC ${{ github.event.inputs.version }}"
+          files: "stabshot/build/libs/VulgarsOSC-${{ github.event.inputs.version }}-1.21.1.jar"
