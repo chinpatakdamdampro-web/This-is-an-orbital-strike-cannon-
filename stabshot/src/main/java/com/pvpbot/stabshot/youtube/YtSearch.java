@@ -19,27 +19,25 @@ public class YtSearch {
             String videoId,
             String title,
             String uploader,
-            long   durationSeconds, // -1 if unknown
+            long   durationSeconds,
             String url
     ) {
         public String durationString() {
             if (durationSeconds < 0) return "?:??";
-            long m = durationSeconds / 60;
+            long h = durationSeconds / 3600;
+            long m = (durationSeconds % 3600) / 60;
             long s = durationSeconds % 60;
+            if (h > 0) return h + ":" + String.format("%02d", m) + ":" + String.format("%02d", s);
             return m + ":" + String.format("%02d", s);
-        }
-
-        @Override
-        public String toString() {
-            return title + " — " + uploader + " (" + durationString() + ")";
         }
     }
 
     /**
-     * Searches YouTube for {@code query} and returns up to {@code maxResults} results.
-     * Runs on whatever thread it's called from — always call off the main thread.
+     * Searches YouTube and returns up to {@code maxResults} results.
+     * Always call off the main thread.
      */
     public static List<YtResult> search(String query, int maxResults) throws Exception {
+        // Always create a fresh downloader — stale instances cause "page needs to be reloaded"
         NewPipe.init(new YtDownloader());
 
         SearchExtractor extractor = ServiceList.YouTube.getSearchExtractor(
@@ -68,10 +66,8 @@ public class YtSearch {
         return results;
     }
 
-    private static String extractVideoId(String url) {
-        // https://www.youtube.com/watch?v=XXXXXXXXXXX
-        if (url.contains("v=")) return url.split("v=")[1].split("&")[0];
-        // https://youtu.be/XXXXXXXXXXX
+    public static String extractVideoId(String url) {
+        if (url.contains("v="))        return url.split("v=")[1].split("&")[0];
         if (url.contains("youtu.be/")) return url.split("youtu.be/")[1].split("\\?")[0];
         return url;
     }
