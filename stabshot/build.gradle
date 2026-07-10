@@ -17,10 +17,9 @@ repositories {
 }
 
 configurations {
-    // Deps to embed into the output jar manually via the jar task.
-    // We cannot use Loom's include() for JitPack artifacts.
+    // 'embed' jars get unpacked into our output jar AND are on the compile classpath.
+    // We need this because Loom's include() does not work for JitPack artifacts.
     embed
-    // embed extends implementation so javac sees the classes too.
     implementation.extendsFrom embed
 }
 
@@ -30,36 +29,31 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    // JLayer — pure-Java MP3 decoder.
-    // include() works fine here because it is on mavenCentral.
+    // JLayer — pure-Java MP3 decoder. On mavenCentral so include() works fine.
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // LWJGL — provided at runtime by Minecraft, compileOnly so never bundled.
+    // LWJGL — already present at runtime via Minecraft. compileOnly so we never bundle it.
     compileOnly "org.lwjgl:lwjgl-openal:3.3.3"
     compileOnly "org.lwjgl:lwjgl-stb:3.3.3"
 
-    // NewPipe Extractor from JitPack.
-    // Note: JitPack group ID must be lowercase: com.github.teamnewpipe
-    // We use the 'embed' configuration so these classes are added to
-    // the jar task output below AND are on the compile classpath.
-    // transitive=false on NewPipe itself to avoid pulling in okhttp etc;
-    // we explicitly list only what is actually needed at runtime.
-    embed('com.github.teamnewpipe:NewPipeExtractor:v0.24.8') { transitive = false }
-
-    // NewPipe's mandatory runtime deps (all on mavenCentral, safe to use include()):
-    include(embed('com.google.code.gson:gson:2.10.1')  { transitive = false })
-    include(embed('org.jsoup:jsoup:1.17.2')            { transitive = false })
-    include(embed('org.mozilla:rhino-engine:1.7.15')   { transitive = false })
+    // NewPipe Extractor.
+    // Exact JitPack coordinates (confirmed from https://jitpack.io/p/teamnewpipe/newpipeextractor):
+    //   groupId:    com.github.teamnewpipe
+    //   artifactId: newpipeextractor   (all lowercase)
+    //   version:    v0.26.3            (latest stable)
+    // NewPipe bundles Rhino, Gson, and jsoup inside its own jar, so no extra deps needed.
+    embed('com.github.teamnewpipe:newpipeextractor:v0.26.3')
 }
 
 jar {
-    // Unpack every jar in the 'embed' config and merge its classes into ours.
+    // Unpack every jar in 'embed' and merge into our output jar.
     from {
         configurations.embed.collect { it.isDirectory() ? it : zipTree(it) }
     }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
-    // Never include LWJGL — it would shadow Minecraft's own native binaries.
+    // Strip any LWJGL classes that might have come in transitively — they would
+    // shadow Minecraft's own native binaries and cause NoSuchMethodError crashes.
     exclude 'org/lwjgl/**'
     exclude 'natives/**'
     exclude '*.so'
