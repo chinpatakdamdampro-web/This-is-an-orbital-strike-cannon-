@@ -293,13 +293,8 @@ public class YtPlayer {
                 int code = head.getResponseCode();
                 head.disconnect();
                 if (code < 400) return url;
-            } catch (InterruptedIOException e) {
-                // timed out probing this URL (SocketTimeoutException is a subclass) — try the next
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while verifying stream URL", e);
             } catch (Exception ignored) {
-                // network error on this URL — try next
+                // timeout, connection refused, or any other error — skip to next URL
             }
         }
 
