@@ -16,20 +16,35 @@ repositories {
     maven { url 'https://jitpack.io' }
 }
 
+configurations {
+    // Separate config for deps we want to bundle but not pull transitives from
+    bundleOnly
+}
+
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     mappings  "net.fabricmc:yarn:${project.yarn_mappings}:v2"
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    // JLayer — MP3 decoding — bundled safely via loom's include
+    // JLayer — MP3 decoding
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // NewPipe Extractor — YouTube stream URL extraction
-    // transitive=false prevents pulling in deps that clash with Minecraft's LWJGL
-    include(implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
+    // NewPipe Extractor — available for compilation WITH transitives
+    // but we only bundle the main jar, not its transitives, to avoid LWJGL conflicts
+    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8')
+    bundleOnly('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
         transitive = false
-    })
+    }
+}
+
+// Bundle only the NewPipe jar itself (no transitives) into our jar
+jar {
+    from {
+        configurations.bundleOnly.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from("LICENSE") { rename { "${it}_${project.archives_base_name}" } }
 }
 
 processResources {
