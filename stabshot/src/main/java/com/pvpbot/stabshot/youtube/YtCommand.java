@@ -4,8 +4,6 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
-import com.pvpbot.stabshot.youtube.YtSearch;
-import com.pvpbot.stabshot.youtube.YtPlayer;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
@@ -20,21 +18,26 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Commands:
- *   /ts yt play <query>       – search YouTube, show top 5 results to pick from
- *   /ts yt play loop <query>  – same but loops
- *   /ts yt pick <number>      – pick a result from last search
- *   /ts yt stop               – stop playback
- *   /ts yt status             – show what's playing
- *   /ts yt download <query>   – download to songs folder as MP3
- *   /ts yt cache size         – show cache size
- *   /ts yt cache clear        – clear cache
+ *   /ts yt play [loop] <query>  – search YouTube, show paginated results
+ *   /ts yt next                 – next page of results
+ *   /ts yt prev                 – previous page of results
+ *   /ts yt pick <1-5>           – pick a result from current page
+ *   /ts yt stop                 – stop playback
+ *   /ts yt status               – show what's playing
+ *   /ts yt download <query>     – download to songs folder
+ *   /ts yt cache size           – show cache size
+ *   /ts yt cache clear          – clear cache
  */
 @Environment(EnvType.CLIENT)
 public class YtCommand {
 
-    // Holds the last search results so /ts yt pick can reference them
-    private static final List<YtSearch.YtResult> lastResults = new CopyOnWriteArrayList<>();
-    private static boolean lastSearchLoop = false;
+    private static final int PAGE_SIZE = 5;
+
+    // All results from last search (up to 15)
+    private static final List<YtSearch.YtResult> allResults = new CopyOnWriteArrayList<>();
+    private static int     currentPage  = 0; // 0-indexed
+    private static boolean lastLoop     = false;
+    private static String  lastQuery    = "";
 
     public static void register(CommandDispatcher<FabricClientCommandSource> dispatcher) {
         dispatcher.register(
@@ -49,9 +52,17 @@ public class YtCommand {
                     .then(ClientCommandManager.argument("query", StringArgumentType.greedyString())
                         .executes(ctx -> execSearch(ctx, false))))
 
+                // /ts yt next
+                .then(ClientCommandManager.literal("next")
+                    .executes(YtCommand::execNext))
+
+                // /ts yt prev
+                .then(ClientCommandManager.literal("prev")
+                    .executes(YtCommand::execPrev))
+
                 // /ts yt pick <1-5>
                 .then(ClientCommandManager.literal("pick")
-                    .then(ClientCommandManager.argument("number", IntegerArgumentType.integer(1, 5))
+                    .then(ClientCommandManager.argument("number", IntegerArgumentType.integer(1, PAGE_SIZE))
                         .executes(YtCommand::execPick)))
 
                 // /ts yt stop
@@ -84,40 +95,27 @@ public class YtCommand {
     private static int execSearch(CommandContext<FabricClientCommandSource> ctx, boolean loop) {
         FabricClientCommandSource src = ctx.getSource();
         String query = StringArgumentType.getString(ctx, "query");
-        lastSearchLoop = loop;
+        lastLoop  = loop;
+        lastQuery = query;
 
-        feedback(src, "§e[YT] Searching: §f" + query + "§e...");
+        feedback(src, "§8§m                              ");
+        feedback(src, "§6§l  ▶ YT §r§e Searching: §f" + query);
+        feedback(src, "§8§m                              ");
 
         new Thread(() -> {
             try {
-                List<YtSearch.YtResult> results = YtSearch.search(query, 5);
-                lastResults.clear();
-                lastResults.addAll(results);
+                // Fetch up to 15 so we have 3 pages locally
+                List<YtSearch.YtResult> results = YtSearch.search(query, 15);
+                allResults.clear();
+                allResults.addAll(results);
+                currentPage = 0;
 
                 if (results.isEmpty()) {
-                    mc(() -> feedback(src, "§c[YT] No results found for: " + query));
+                    mc(() -> feedback(src, "§c  No results found for: §f" + query));
                     return;
                 }
 
-                mc(() -> {
-                    feedback(src, "§6§l[YT] Results for \"" + query + "\"§r§7 — click to play:");
-                    for (int i = 0; i < results.size(); i++) {
-                        YtSearch.YtResult r = results.get(i);
-                        String cmd = "/ts yt pick " + (i + 1);
-                        MutableText line = Text.literal("")
-                            .append(Text.literal("§a[" + (i + 1) + "] ")
-                                .setStyle(Style.EMPTY
-                                    .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, cmd))))
-                            .append(Text.literal("§f" + r.title())
-                                .setStyle(Style.EMPTY
-                                    .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, cmd))))
-                            .append(Text.literal(" §7— " + r.uploader() + " §8(" + r.durationString() + ")")
-                                .setStyle(Style.EMPTY
-                                    .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, cmd))));
-                        src.sendFeedback(line);
-                    }
-                    feedback(src, "§7Click a result or type §f/ts yt pick <1-" + results.size() + ">");
-                });
+                mc(() -> showPage(src, currentPage));
             } catch (Exception e) {
                 mc(() -> feedback(src, "§c[YT] Search error: " + e.getMessage()));
             }
@@ -126,24 +124,62 @@ public class YtCommand {
         return 1;
     }
 
+    private static int execNext(CommandContext<FabricClientCommandSource> ctx) {
+        FabricClientCommandSource src = ctx.getSource();
+        int totalPages = getTotalPages();
+        if (allResults.isEmpty()) {
+            feedback(src, "§c[YT] No search results. Run §f/ts yt play <query> §cfirst.");
+            return 0;
+        }
+        if (currentPage >= totalPages - 1) {
+            feedback(src, "§7[YT] Already on the last page.");
+            return 0;
+        }
+        currentPage++;
+        showPage(src, currentPage);
+        return 1;
+    }
+
+    private static int execPrev(CommandContext<FabricClientCommandSource> ctx) {
+        FabricClientCommandSource src = ctx.getSource();
+        if (allResults.isEmpty()) {
+            feedback(src, "§c[YT] No search results. Run §f/ts yt play <query> §cfirst.");
+            return 0;
+        }
+        if (currentPage <= 0) {
+            feedback(src, "§7[YT] Already on the first page.");
+            return 0;
+        }
+        currentPage--;
+        showPage(src, currentPage);
+        return 1;
+    }
+
     private static int execPick(CommandContext<FabricClientCommandSource> ctx) {
         FabricClientCommandSource src = ctx.getSource();
         int number = IntegerArgumentType.getInteger(ctx, "number");
 
-        if (lastResults.isEmpty()) {
-            feedback(src, "§c[YT] No search results to pick from. Run §f/ts yt play <query> §cfirst.");
-            return 0;
-        }
-        if (number > lastResults.size()) {
-            feedback(src, "§c[YT] Only " + lastResults.size() + " results available.");
+        if (allResults.isEmpty()) {
+            feedback(src, "§c[YT] No search results. Run §f/ts yt play <query> §cfirst.");
             return 0;
         }
 
-        YtSearch.YtResult result = lastResults.get(number - 1);
-        feedback(src, "§a[YT] Playing: §f" + result.title() + " §7— " + result.uploader()
-                + (lastSearchLoop ? " §7(looping)" : ""));
+        int globalIndex = currentPage * PAGE_SIZE + (number - 1);
+        if (globalIndex >= allResults.size()) {
+            feedback(src, "§c[YT] No result §f#" + number + " §con this page.");
+            return 0;
+        }
 
-        YtPlayer.getInstance().play(result, lastSearchLoop);
+        YtSearch.YtResult result = allResults.get(globalIndex);
+
+        feedback(src, "§8§m                              ");
+        feedback(src, "§6§l  ▶ §r§f" + result.title());
+        feedback(src, "§7  by §e" + result.uploader()
+                + "  §8[§7" + result.durationString() + "§8]"
+                + (lastLoop ? "  §b⟳ looping" : ""));
+        feedback(src, "§8§m                              ");
+
+        YtPlayer.getInstance().play(result, lastLoop);
         return 1;
     }
 
@@ -152,7 +188,7 @@ public class YtCommand {
         String title = YtPlayer.getInstance().getCurrentTitle();
         YtPlayer.getInstance().stop();
         if (title != null) {
-            feedback(src, "§7[YT] Stopped: §f" + title);
+            feedback(src, "§7[YT] ■ Stopped: §f" + title);
         } else {
             feedback(src, "§7[YT] Nothing was playing.");
         }
@@ -174,13 +210,13 @@ public class YtCommand {
         FabricClientCommandSource src = ctx.getSource();
         String query = StringArgumentType.getString(ctx, "query");
 
-        feedback(src, "§e[YT] Searching for download: §f" + query + "§e...");
+        feedback(src, "§e[YT] Searching for: §f" + query + "§e...");
 
         new Thread(() -> {
             try {
                 List<YtSearch.YtResult> results = YtSearch.search(query, 1);
                 if (results.isEmpty()) {
-                    mc(() -> feedback(src, "§c[YT] No results found for: " + query));
+                    mc(() -> feedback(src, "§c[YT] No results found for: §f" + query));
                     return;
                 }
                 YtPlayer.getInstance().download(results.get(0));
@@ -193,8 +229,8 @@ public class YtCommand {
     }
 
     private static int execCacheSize(CommandContext<FabricClientCommandSource> ctx) {
-        feedback(ctx.getSource(), "§7[YT] Cache size: §f" + YtPlayer.getInstance().getCacheSizeString()
-                + " §7/ 100 MB");
+        feedback(ctx.getSource(), "§7[YT] Cache: §f"
+                + YtPlayer.getInstance().getCacheSizeString() + " §7/ 100 MB");
         return 1;
     }
 
@@ -210,8 +246,77 @@ public class YtCommand {
     }
 
     // -----------------------------------------------------------------------
+    // Page display
+    // -----------------------------------------------------------------------
+
+    private static void showPage(FabricClientCommandSource src, int page) {
+        int totalPages = getTotalPages();
+        int start = page * PAGE_SIZE;
+        int end   = Math.min(start + PAGE_SIZE, allResults.size());
+
+        feedback(src, "§8§m                              ");
+        feedback(src, "§6§l  ▶ YT §r§7 Results for §f\"" + lastQuery + "§f\""
+                + "  §8[§7Page " + (page + 1) + "/" + totalPages + "§8]");
+        feedback(src, "§8§m                              ");
+
+        for (int i = start; i < end; i++) {
+            YtSearch.YtResult r   = allResults.get(i);
+            int               num = (i - start) + 1;
+            String            cmd = "/ts yt pick " + num;
+
+            // Truncate long titles so they don't wrap badly on mobile
+            String title = r.title().length() > 40
+                    ? r.title().substring(0, 38) + "…"
+                    : r.title();
+
+            MutableText line = Text.literal("")
+                .append(clickable(
+                    Text.literal("§a [" + num + "] "),
+                    cmd))
+                .append(clickable(
+                    Text.literal("§f" + title),
+                    cmd))
+                .append(clickable(
+                    Text.literal(" §8[§7" + r.durationString() + "§8]"),
+                    cmd));
+
+            src.sendFeedback(line);
+
+            // Uploader on second line, slightly indented
+            src.sendFeedback(clickable(
+                Text.literal("§8     ↳ §e" + r.uploader()),
+                cmd));
+        }
+
+        feedback(src, "§8§m                              ");
+
+        // Navigation row
+        MutableText nav = Text.literal("§7  ");
+        if (page > 0) {
+            nav.append(clickable(Text.literal("§b[◀ Prev]"), "/ts yt prev"));
+            nav.append(Text.literal(" "));
+        }
+        nav.append(Text.literal("§7Pick: §f/ts yt pick §71-" + (end - start)));
+        if (page < totalPages - 1) {
+            nav.append(Text.literal(" "));
+            nav.append(clickable(Text.literal("§b[Next ▶]"), "/ts yt next"));
+        }
+        src.sendFeedback(nav);
+        feedback(src, "§8§m                              ");
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    private static int getTotalPages() {
+        return (int) Math.ceil((double) allResults.size() / PAGE_SIZE);
+    }
+
+    private static MutableText clickable(MutableText text, String command) {
+        return text.setStyle(Style.EMPTY
+                .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, command)));
+    }
 
     private static void feedback(FabricClientCommandSource src, String msg) {
         src.sendFeedback(Text.literal(msg));
