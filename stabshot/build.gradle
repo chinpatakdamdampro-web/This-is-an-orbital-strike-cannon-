@@ -16,54 +16,44 @@ repositories {
     maven { url 'https://jitpack.io' }
 }
 
-configurations {
-    // Libraries we want to bundle into the output jar without pulling their
-    // transitive dependencies (which might conflict with Minecraft's own libs).
-    bundleOnly
-}
-
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     mappings  "net.fabricmc:yarn:${project.yarn_mappings}:v2"
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    // ── Audio ──────────────────────────────────────────────────────────────────
-    // JLayer — pure-Java MP3 frame decoder. Works on desktop and Android JRE.
-    // Minecraft does NOT ship JLayer, so we must bundle it.
+    // JLayer — pure-Java MP3 decoder. Bundled via include() so Loom
+    // correctly includes it in the final remapped jar.
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // LWJGL (OpenAL + STB Vorbis) — already present at runtime via Minecraft;
-    // declared here only for compilation so the compiler can resolve the classes.
-    // 'compileOnly' ensures nothing gets added to the bundled jar or classpath
-    // at runtime (Minecraft provides the real native libs).
-    // We reference the LWJGL BOM so the version matches what MC 1.21.1 ships.
+    // LWJGL OpenAL + STBVorbis — provided at runtime by Minecraft's own
+    // LWJGL bundle. compileOnly so they resolve at compile time but are
+    // never packaged into our jar (which would shadow MC's natives).
     compileOnly "org.lwjgl:lwjgl-openal:3.3.3"
     compileOnly "org.lwjgl:lwjgl-stb:3.3.3"
 
-    // ── YouTube extraction ─────────────────────────────────────────────────────
-    // NewPipe Extractor — full dependency graph for compilation (so transitive
-    // deps like Gson are on the compile classpath), but we only bundle the main
-    // jar without its transitives.  Gson and other transitive libs are provided
-    // by Minecraft's own classpath at runtime.
-    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8')
-    bundleOnly('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
-        transitive = false
-    }
+    // NewPipe Extractor + its required transitive dependencies.
+    // We use include() for each so Fabric Loom correctly embeds them into
+    // the remapped output jar. transitive=false on each because we list
+    // only what NewPipe actually needs at runtime and nothing that would
+    // conflict with Minecraft (no OkHttp, no LWJGL, etc).
+    //
+    // Required at runtime by NewPipe Extractor v0.24.8:
+    //   - newpipe-extractor itself
+    //   - rhino-engine  (JavaScript engine for YouTube cipher decryption)
+    //   - gson          (JSON parsing)
+    //   - jsoup         (HTML parsing for fallback extraction)
+    include(implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') { transitive = false })
+    include(implementation('org.mozilla:rhino-engine:1.7.15')                 { transitive = false })
+    include(implementation('com.google.code.gson:gson:2.10.1')                { transitive = false })
+    include(implementation('org.jsoup:jsoup:1.17.2')                         { transitive = false })
 }
 
-// ── Jar bundling ───────────────────────────────────────────────────────────────
-// Bundle only the NewPipe jar itself (no transitives) and JLayer (handled by
-// `include` above).  We explicitly exclude any LWJGL or STB classes that might
-// have leaked in so we never shadow Minecraft's own native LWJGL binaries.
 jar {
-    from {
-        configurations.bundleOnly.collect { it.isDirectory() ? it : zipTree(it) }
-    }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
-    // Hard exclude any LWJGL/native classes that might have crept in transitively.
-    // This prevents "NoSuchMethodError" crashes caused by shadowing Minecraft's LWJGL.
+    // Never let any LWJGL classes slip into our jar — they would shadow
+    // Minecraft's own natives and cause NoSuchMethodError crashes.
     exclude 'org/lwjgl/**'
     exclude 'natives/**'
     exclude '*.so'
