@@ -28,15 +28,10 @@ import java.util.concurrent.atomic.AtomicReference;
 @Environment(EnvType.CLIENT)
 public class YtPlayer {
 
-    // -----------------------------------------------------------------------
-    // Config
-    // -----------------------------------------------------------------------
     private static final long   MAX_CACHE_BYTES = 100L * 1024 * 1024; // 100 MB
     private static final String CACHE_FOLDER    = "stabshot/yt_cache";
 
-    // -----------------------------------------------------------------------
     // Singleton
-    // -----------------------------------------------------------------------
     private static YtPlayer instance;
     public static YtPlayer getInstance() {
         if (instance == null) instance = new YtPlayer();
@@ -44,9 +39,7 @@ public class YtPlayer {
     }
     private YtPlayer() {}
 
-    // -----------------------------------------------------------------------
     // State
-    // -----------------------------------------------------------------------
     private final AtomicBoolean           loopActive   = new AtomicBoolean(false);
     private final AtomicReference<String> currentTitle = new AtomicReference<>(null);
     private final AtomicBoolean           playing      = new AtomicBoolean(false);
@@ -67,11 +60,10 @@ public class YtPlayer {
                 do {
                     Path cached = getCachedFile(result.videoId());
                     if (cached != null) {
-                        // Already fully cached — play from disk, zero data usage
+                        // Fully cached — zero data usage
                         ThemeSongPlayer.playFile(cached);
                         waitForPlayback(cached);
                     } else {
-                        // Stream from YouTube and cache chunks as they arrive
                         streamAndCache(result);
                     }
                 } while (loopActive.get() && !Thread.currentThread().isInterrupted());
@@ -97,20 +89,16 @@ public class YtPlayer {
     public boolean isPlaying()       { return playing.get(); }
     public String  getCurrentTitle() { return currentTitle.get(); }
 
-    /**
-     * Downloads the full track to the songs folder as an MP3.
-     * Works on PC and PojavLauncher.
-     */
     public void download(YtSearch.YtResult result) {
         new Thread(() -> {
             try {
-                sendChat("§e[YT] Downloading: " + result.title() + "...");
+                sendChat("§e[YT] Downloading: §f" + result.title() + "§e...");
                 String audioUrl = resolveAudioUrl(result.url());
                 Path dest = ThemeSongPlayer.getSongsDir()
                         .resolve(sanitizeFilename(result.title()) + ".mp3");
                 Files.createDirectories(dest.getParent());
                 downloadToFile(audioUrl, dest);
-                sendChat("§a[YT] Downloaded to songs folder: §f" + dest.getFileName());
+                sendChat("§a[YT] Saved to songs folder: §f" + dest.getFileName());
             } catch (Exception e) {
                 sendChat("§c[YT] Download failed: " + e.getMessage());
             }
@@ -150,12 +138,8 @@ public class YtPlayer {
         }
     }
 
-    /**
-     * Streams audio from YouTube, writing to a temp cache file as chunks arrive.
-     * ThemeSongPlayer plays from the growing file simultaneously.
-     * On second play the full cached file is used — zero data.
-     */
     private void streamAndCache(YtSearch.YtResult result) throws Exception {
+        // Always resolve a FRESH audio URL — never cache the URL itself, only the file
         String audioUrl = resolveAudioUrl(result.url());
 
         Path cacheDir  = getCacheDir();
@@ -166,7 +150,6 @@ public class YtPlayer {
         Files.deleteIfExists(tempFile);
 
         AtomicBoolean downloadDone = new AtomicBoolean(false);
-
         Thread downloadThread = new Thread(() -> {
             try {
                 downloadToFile(audioUrl, tempFile);
@@ -181,7 +164,7 @@ public class YtPlayer {
         downloadThread.setDaemon(true);
         downloadThread.start();
 
-        // Wait up to 5 seconds for ~256 KB to buffer before starting playback
+        // Wait up to 5s for 256 KB to buffer
         int waited = 0;
         while (waited < 5000) {
             if (Files.exists(tempFile) && Files.size(tempFile) > 256_000) break;
@@ -198,8 +181,16 @@ public class YtPlayer {
         downloadThread.join(30_000);
     }
 
+    /**
+     * Resolves a fresh direct audio stream URL from YouTube.
+     * Called every time — YouTube stream URLs expire after ~6 hours.
+     * This is the fix for "The page needs to be reloaded" — we never
+     * reuse a stale URL, always get a new one from a fresh extractor.
+     */
     private String resolveAudioUrl(String videoUrl) throws Exception {
+        // Fresh init every call to avoid stale extractor state
         NewPipe.init(new YtDownloader());
+
         StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, videoUrl);
 
         List<AudioStream> streams = info.getAudioStreams();
@@ -207,13 +198,21 @@ public class YtPlayer {
             throw new IOException("No audio streams found for: " + videoUrl);
         }
 
-        // Pick lowest bitrate to save mobile data
-        return streams.stream()
+        // Lowest bitrate = least data used on mobile
+        AudioStream best = streams.stream()
+                .filter(s -> {
+                    try { return s.getBitrate() > 0; } catch (Exception e) { return false; }
+                })
                 .min(Comparator.comparingInt(s -> {
                     try { return s.getBitrate(); } catch (Exception e) { return Integer.MAX_VALUE; }
                 }))
-                .orElse(streams.get(0))
-                .getContent();
+                .orElse(streams.get(0));
+
+        String url = best.getContent();
+        if (url == null || url.isBlank()) {
+            throw new IOException("Stream URL was empty — YouTube may have changed their API.");
+        }
+        return url;
     }
 
     private static void downloadToFile(String url, Path dest) throws Exception {
@@ -224,7 +223,14 @@ public class YtPlayer {
                 .GET()
                 .build();
 
-        HttpResponse<InputStream> resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        HttpResponse<InputStream> resp;
+        try {
+            resp = http.send(req, HttpResponse.BodyHandlers.ofInputStream());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Download interrupted", e);
+        }
+
         try (InputStream  in  = new BufferedInputStream(resp.body(), 8192);
              OutputStream out = Files.newOutputStream(dest,
                      StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
@@ -237,13 +243,11 @@ public class YtPlayer {
         }
     }
 
-    /** Blocks until ThemeSongPlayer finishes (estimates duration from file size). */
     private void waitForPlayback(Path file) throws InterruptedException {
         long fileSizeBytes = 0;
         try { fileSizeBytes = Files.size(file); } catch (Exception ignored) {}
-        // Rough estimate: 128kbps ≈ 16 KB/s
+        // ~128kbps = 16 KB/s
         long estimatedMs = (fileSizeBytes > 0) ? (fileSizeBytes / 16_000) * 1000 : 300_000;
-
         long start = System.currentTimeMillis();
         while (System.currentTimeMillis() - start < estimatedMs) {
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
@@ -252,7 +256,6 @@ public class YtPlayer {
         }
     }
 
-    /** Returns the cached MP3 if it exists and is fully downloaded (not .tmp). */
     private Path getCachedFile(String videoId) {
         Path f = getCacheDir().resolve(videoId + ".mp3");
         return Files.exists(f) ? f : null;
@@ -262,12 +265,10 @@ public class YtPlayer {
         return FabricLoader.getInstance().getConfigDir().resolve(CACHE_FOLDER);
     }
 
-    /** Evicts LRU cache files until total is under MAX_CACHE_BYTES. */
     private void evictCacheIfNeeded() {
         try {
             Path dir = getCacheDir();
             if (!Files.exists(dir)) return;
-
             List<Path> files = Files.walk(dir)
                     .filter(p -> p.toString().endsWith(".mp3"))
                     .sorted(Comparator.comparingLong(p -> {
@@ -275,11 +276,9 @@ public class YtPlayer {
                         catch (Exception e) { return 0L; }
                     }))
                     .toList();
-
             long total = files.stream().mapToLong(p -> {
                 try { return Files.size(p); } catch (Exception e) { return 0L; }
             }).sum();
-
             for (Path f : files) {
                 if (total <= MAX_CACHE_BYTES) break;
                 long size = Files.size(f);
