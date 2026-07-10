@@ -16,6 +16,14 @@ repositories {
     maven { url 'https://jitpack.io' }
 }
 
+configurations {
+    // Deps to embed into the output jar manually via the jar task.
+    // We cannot use Loom's include() for JitPack artifacts.
+    embed
+    // embed extends implementation so javac sees the classes too.
+    implementation.extendsFrom embed
+}
+
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     mappings  "net.fabricmc:yarn:${project.yarn_mappings}:v2"
@@ -23,39 +31,35 @@ dependencies {
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
     // JLayer — pure-Java MP3 decoder.
+    // include() works fine here because it is on mavenCentral.
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // LWJGL OpenAL + STBVorbis — provided at runtime by Minecraft.
-    // compileOnly so they resolve at compile time but are never packaged.
+    // LWJGL — provided at runtime by Minecraft, compileOnly so never bundled.
     compileOnly "org.lwjgl:lwjgl-openal:3.3.3"
     compileOnly "org.lwjgl:lwjgl-stb:3.3.3"
 
-    // NewPipe Extractor + required runtime dependencies.
-    // Each needs BOTH implementation() (compile classpath) AND include() (bundled into jar).
-    // include() alone does NOT put classes on the compile classpath in Fabric Loom.
-    // transitive=false on each — we only bundle what NewPipe actually needs at runtime.
-    //
-    //   newpipe-extractor — core extraction logic
-    //   rhino-engine      — JS engine for YouTube cipher decryption (required at runtime)
-    //   gson              — JSON parsing used internally by NewPipe
-    //   jsoup             — HTML parsing used internally by NewPipe
-    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') { transitive = false }
-    include('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8')        { transitive = false }
+    // NewPipe Extractor from JitPack.
+    // Note: JitPack group ID must be lowercase: com.github.teamnewpipe
+    // We use the 'embed' configuration so these classes are added to
+    // the jar task output below AND are on the compile classpath.
+    // transitive=false on NewPipe itself to avoid pulling in okhttp etc;
+    // we explicitly list only what is actually needed at runtime.
+    embed('com.github.teamnewpipe:NewPipeExtractor:v0.24.8') { transitive = false }
 
-    implementation('org.mozilla:rhino-engine:1.7.15') { transitive = false }
-    include('org.mozilla:rhino-engine:1.7.15')        { transitive = false }
-
-    implementation('com.google.code.gson:gson:2.10.1') { transitive = false }
-    include('com.google.code.gson:gson:2.10.1')        { transitive = false }
-
-    implementation('org.jsoup:jsoup:1.17.2') { transitive = false }
-    include('org.jsoup:jsoup:1.17.2')        { transitive = false }
+    // NewPipe's mandatory runtime deps (all on mavenCentral, safe to use include()):
+    include(embed('com.google.code.gson:gson:2.10.1')  { transitive = false })
+    include(embed('org.jsoup:jsoup:1.17.2')            { transitive = false })
+    include(embed('org.mozilla:rhino-engine:1.7.15')   { transitive = false })
 }
 
 jar {
+    // Unpack every jar in the 'embed' config and merge its classes into ours.
+    from {
+        configurations.embed.collect { it.isDirectory() ? it : zipTree(it) }
+    }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
-    // Never let LWJGL classes into our jar — they shadow MC's natives.
+    // Never include LWJGL — it would shadow Minecraft's own native binaries.
     exclude 'org/lwjgl/**'
     exclude 'natives/**'
     exclude '*.so'
