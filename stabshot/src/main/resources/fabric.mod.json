@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "id": "stabshot",
-  "version": "2.0.0",
+  "version": "2.5.0",
   "name": "Vulgar's OSC",
-  "description": "Orbital Strike Cannon with cinematic explosions, custom sounds, and configurable fire delay. Part of PvPBot.",
+  "description": "Bum Ash Orbital Addon for ma pvpbot mawd Uh made by VulgarMC/LostGalaxy on discord, PS: PLEASE DON'T ASK FOR HELP IN GENERAL BUG REPORTS EXISTS.",
   "authors": ["VulgarMC"],
   "license": "MIT",
   "icon": "assets/stabshot/icon.png",
