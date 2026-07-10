@@ -1,46 +1,88 @@
 name: Build StabShot 1.21.1
 
+# Run on every push to main or any tag, and allow manual triggers.
 on:
+  push:
+    branches: [ "main" ]
+    tags:     [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version name (e.g. v0.1)"
-        required: true
-        default: "v0.1"
+        description: "Version label appended to the artifact name (e.g. v1.0.0)"
+        required: false
+        default: "dev"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
+      # ── 1. Checkout ───────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ── 2. JDK 21 ─────────────────────────────────────────────────────────────
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
 
+      # ── 3. Gradle 8.6 ─────────────────────────────────────────────────────────
       - name: Set up Gradle 8.6
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.6'
 
+      # ── 4. Build ──────────────────────────────────────────────────────────────
       - name: Build mod
         working-directory: stabshot
         run: gradle build --no-daemon --no-build-cache
 
+      # ── 5. Determine version label ────────────────────────────────────────────
+      # Priority: manual input > tag name > short commit SHA
+      - name: Resolve version label
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "label=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "label=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "label=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 6. Rename jar ─────────────────────────────────────────────────────────
       - name: Rename jar
         run: |
-          JAR=$(ls stabshot/build/libs/stabshot-*.jar | grep -v sources)
-          mv "$JAR" "stabshot/build/libs/VulgarsOSC-${{ github.event.inputs.version }}-1.21.1.jar"
+          JAR=$(ls stabshot/build/libs/stabshot-*.jar 2>/dev/null | grep -v sources | head -n1)
+          if [ -z "$JAR" ]; then
+            echo "ERROR: No output jar found in stabshot/build/libs/" >&2
+            ls stabshot/build/libs/ >&2
+            exit 1
+          fi
+          DEST="stabshot/build/libs/VulgarsOSC-${{ steps.version.outputs.label }}-1.21.1.jar"
+          mv "$JAR" "$DEST"
+          echo "Renamed: $JAR → $DEST"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      # ── 7. Upload mod jar as workflow artifact ────────────────────────────────
+      # The compiled jar is available for download directly from the
+      # "Summary" page of the workflow run — no GitHub Release required.
+      - name: Upload mod jar
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: "${{ github.event.inputs.version }}"
-          name: "Vulgar's OSC ${{ github.event.inputs.version }}"
-          files: "stabshot/build/libs/VulgarsOSC-${{ github.event.inputs.version }}-1.21.1.jar"
+          name: "VulgarsOSC-${{ steps.version.outputs.label }}-1.21.1"
+          path: "stabshot/build/libs/VulgarsOSC-${{ steps.version.outputs.label }}-1.21.1.jar"
+          retention-days: 90
+          if-no-files-found: error
+
+      # ── 8. Upload sources jar (optional, useful for debugging) ────────────────
+      - name: Upload sources jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: "VulgarsOSC-${{ steps.version.outputs.label }}-1.21.1-sources"
+          path: "stabshot/build/libs/stabshot-*-sources.jar"
+          retention-days: 90
+          if-no-files-found: warn
