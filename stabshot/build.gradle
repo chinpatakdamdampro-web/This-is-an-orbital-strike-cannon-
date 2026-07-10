@@ -22,38 +22,40 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    // JLayer — pure-Java MP3 decoder. Bundled via include() so Loom
-    // correctly includes it in the final remapped jar.
+    // JLayer — pure-Java MP3 decoder.
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // LWJGL OpenAL + STBVorbis — provided at runtime by Minecraft's own
-    // LWJGL bundle. compileOnly so they resolve at compile time but are
-    // never packaged into our jar (which would shadow MC's natives).
+    // LWJGL OpenAL + STBVorbis — provided at runtime by Minecraft.
+    // compileOnly so they resolve at compile time but are never packaged.
     compileOnly "org.lwjgl:lwjgl-openal:3.3.3"
     compileOnly "org.lwjgl:lwjgl-stb:3.3.3"
 
-    // NewPipe Extractor + its required transitive dependencies.
-    // We use include() for each so Fabric Loom correctly embeds them into
-    // the remapped output jar. transitive=false on each because we list
-    // only what NewPipe actually needs at runtime and nothing that would
-    // conflict with Minecraft (no OkHttp, no LWJGL, etc).
+    // NewPipe Extractor + required runtime dependencies.
+    // Each needs BOTH implementation() (compile classpath) AND include() (bundled into jar).
+    // include() alone does NOT put classes on the compile classpath in Fabric Loom.
+    // transitive=false on each — we only bundle what NewPipe actually needs at runtime.
     //
-    // Required at runtime by NewPipe Extractor v0.24.8:
-    //   - newpipe-extractor itself
-    //   - rhino-engine  (JavaScript engine for YouTube cipher decryption)
-    //   - gson          (JSON parsing)
-    //   - jsoup         (HTML parsing for fallback extraction)
-    include(implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') { transitive = false })
-    include(implementation('org.mozilla:rhino-engine:1.7.15')                 { transitive = false })
-    include(implementation('com.google.code.gson:gson:2.10.1')                { transitive = false })
-    include(implementation('org.jsoup:jsoup:1.17.2')                         { transitive = false })
+    //   newpipe-extractor — core extraction logic
+    //   rhino-engine      — JS engine for YouTube cipher decryption (required at runtime)
+    //   gson              — JSON parsing used internally by NewPipe
+    //   jsoup             — HTML parsing used internally by NewPipe
+    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') { transitive = false }
+    include('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8')        { transitive = false }
+
+    implementation('org.mozilla:rhino-engine:1.7.15') { transitive = false }
+    include('org.mozilla:rhino-engine:1.7.15')        { transitive = false }
+
+    implementation('com.google.code.gson:gson:2.10.1') { transitive = false }
+    include('com.google.code.gson:gson:2.10.1')        { transitive = false }
+
+    implementation('org.jsoup:jsoup:1.17.2') { transitive = false }
+    include('org.jsoup:jsoup:1.17.2')        { transitive = false }
 }
 
 jar {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
-    // Never let any LWJGL classes slip into our jar — they would shadow
-    // Minecraft's own natives and cause NoSuchMethodError crashes.
+    // Never let LWJGL classes into our jar — they shadow MC's natives.
     exclude 'org/lwjgl/**'
     exclude 'natives/**'
     exclude '*.so'
