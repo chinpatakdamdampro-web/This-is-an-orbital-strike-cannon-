@@ -17,7 +17,8 @@ repositories {
 }
 
 configurations {
-    // Separate config for deps we want to bundle but not pull transitives from
+    // Libraries we want to bundle into the output jar without pulling their
+    // transitive dependencies (which might conflict with Minecraft's own libs).
     bundleOnly
 }
 
@@ -27,23 +28,48 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    // JLayer — MP3 decoding
+    // ── Audio ──────────────────────────────────────────────────────────────────
+    // JLayer — pure-Java MP3 frame decoder. Works on desktop and Android JRE.
+    // Minecraft does NOT ship JLayer, so we must bundle it.
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // NewPipe Extractor — available for compilation WITH transitives
-    // but we only bundle the main jar, not its transitives, to avoid LWJGL conflicts
+    // LWJGL (OpenAL + STB Vorbis) — already present at runtime via Minecraft;
+    // declared here only for compilation so the compiler can resolve the classes.
+    // 'compileOnly' ensures nothing gets added to the bundled jar or classpath
+    // at runtime (Minecraft provides the real native libs).
+    // We reference the LWJGL BOM so the version matches what MC 1.21.1 ships.
+    compileOnly "org.lwjgl:lwjgl-openal:3.3.3"
+    compileOnly "org.lwjgl:lwjgl-stb:3.3.3"
+
+    // ── YouTube extraction ─────────────────────────────────────────────────────
+    // NewPipe Extractor — full dependency graph for compilation (so transitive
+    // deps like Gson are on the compile classpath), but we only bundle the main
+    // jar without its transitives.  Gson and other transitive libs are provided
+    // by Minecraft's own classpath at runtime.
     implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8')
     bundleOnly('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
         transitive = false
     }
 }
 
-// Bundle only the NewPipe jar itself (no transitives) into our jar
+// ── Jar bundling ───────────────────────────────────────────────────────────────
+// Bundle only the NewPipe jar itself (no transitives) and JLayer (handled by
+// `include` above).  We explicitly exclude any LWJGL or STB classes that might
+// have leaked in so we never shadow Minecraft's own native LWJGL binaries.
 jar {
     from {
         configurations.bundleOnly.collect { it.isDirectory() ? it : zipTree(it) }
     }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    // Hard exclude any LWJGL/native classes that might have crept in transitively.
+    // This prevents "NoSuchMethodError" crashes caused by shadowing Minecraft's LWJGL.
+    exclude 'org/lwjgl/**'
+    exclude 'natives/**'
+    exclude '*.so'
+    exclude '*.dll'
+    exclude '*.dylib'
+
     from("LICENSE") { rename { "${it}_${project.archives_base_name}" } }
 }
 
@@ -56,7 +82,7 @@ processResources {
 
 tasks.withType(JavaCompile).configureEach {
     it.options.encoding = "UTF-8"
-    it.options.release = 21
+    it.options.release  = 21
 }
 
 java {
