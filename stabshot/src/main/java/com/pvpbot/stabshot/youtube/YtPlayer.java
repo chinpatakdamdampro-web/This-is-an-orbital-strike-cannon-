@@ -22,23 +22,6 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Handles YouTube audio streaming and caching.
- *
- * <h3>Key changes from previous version</h3>
- * <ul>
- *   <li>{@code java.net.http.HttpClient} replaced with {@link HttpURLConnection}
- *       throughout (HTTP download, HEAD verification). {@code HttpClient} is a
- *       Java 11 API absent on the Android JREs used by ZalithLauncher 1,
- *       PojavLauncher and MojoLauncher. {@link HttpURLConnection} is available
- *       everywhere.</li>
- *   <li>HEAD-request URL verification is kept but now uses
- *       {@link HttpURLConnection} with a short connect-timeout to avoid
- *       blocking the caller for too long on flaky connections.</li>
- *   <li>Download streaming uses chunked I/O so large audio files (20–100 MB)
- *       do not accumulate in memory before being written to disk.</li>
- * </ul>
- */
 @Environment(EnvType.CLIENT)
 public class YtPlayer {
 
@@ -54,10 +37,10 @@ public class YtPlayer {
     private YtPlayer() {}
 
     // ── State ──────────────────────────────────────────────────────────────────
-    private final AtomicBoolean           loopActive    = new AtomicBoolean(false);
-    private final AtomicReference<String> currentTitle  = new AtomicReference<>(null);
+    private final AtomicBoolean           loopActive     = new AtomicBoolean(false);
+    private final AtomicReference<String> currentTitle   = new AtomicReference<>(null);
     private final AtomicReference<String> currentVideoId = new AtomicReference<>(null);
-    private final AtomicBoolean           playing       = new AtomicBoolean(false);
+    private final AtomicBoolean           playing        = new AtomicBoolean(false);
     private Thread                        playThread;
 
     // ── Public API ─────────────────────────────────────────────────────────────
@@ -104,11 +87,9 @@ public class YtPlayer {
     public String  getCurrentTitle() { return currentTitle.get(); }
 
     /**
-     * Downloads the top result for {@code result} to the songs folder.
+     * Downloads {@code result} to the songs folder.
      *
-     * @param result     the video to download
-     * @param customName filename to save as (without extension), or {@code null}
-     *                   to use the sanitized video title
+     * @param customName filename without extension, or {@code null} to use the video title
      */
     public void download(YtSearch.YtResult result, String customName) {
         new Thread(() -> {
@@ -132,35 +113,26 @@ public class YtPlayer {
         }, "YtDownload-Thread").start();
     }
 
-    /** Backwards-compatible overload: uses the video title as the filename. */
     public void download(YtSearch.YtResult result) {
         download(result, null);
     }
 
     /**
-     * Copies the cached file for the most recently played video to the songs
-     * folder under {@code name} (without extension).
-     *
-     * @return {@code null} on success, or a user-visible error string on failure
+     * Copies the cached file for the most recently played video to the songs folder.
+     * @return {@code null} on success, or a user-visible error string
      */
     public String saveCurrentToSongs(String name) {
         String videoId = currentVideoId.get();
-        if (videoId == null) {
-            return "No YouTube track has been played yet this session.";
-        }
+        if (videoId == null) return "No YouTube track has been played yet this session.";
         Path cached = getCachedFile(videoId);
-        if (cached == null) {
-            return "Cached file not found for the current track. Try playing it first with /ts yt pick.";
-        }
+        if (cached == null) return "Cached file not found. Play a track first with /ts yt pick.";
         String safeName = sanitizeFilename(name);
-        if (safeName.isEmpty()) {
-            return "Invalid filename: §f" + name;
-        }
+        if (safeName.isEmpty()) return "Invalid filename: §f" + name;
         Path dest = ThemeSongPlayer.getSongsDir().resolve(safeName + ".mp3");
         try {
             Files.createDirectories(dest.getParent());
-            Files.copy(cached, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            return null; // success
+            Files.copy(cached, dest, StandardCopyOption.REPLACE_EXISTING);
+            return null;
         } catch (Exception e) {
             return "Could not save file: " + e.getMessage();
         }
@@ -199,12 +171,12 @@ public class YtPlayer {
     }
 
     private void streamAndCache(YtSearch.YtResult result) throws Exception {
-        // Resolve a fresh audio URL every time — YouTube stream URLs expire after ~6 h.
         String audioUrl = resolveAudioUrl(result.url());
 
         Path cacheDir  = getCacheDir();
         Files.createDirectories(cacheDir);
-        Path tempFile  = cacheDir.resolve(result.videoId() + ".tmp");
+        // Always use .mp3 extension so ThemeSongPlayer knows the format
+        Path tempFile  = cacheDir.resolve(result.videoId() + ".tmp.mp3");
         Path finalFile = cacheDir.resolve(result.videoId() + ".mp3");
 
         Files.deleteIfExists(tempFile);
@@ -224,16 +196,16 @@ public class YtPlayer {
         downloadThread.setDaemon(true);
         downloadThread.start();
 
-        // Wait up to 8 s for at least 256 KB to buffer (slightly longer than before
-        // to accommodate slower mobile connections).
+        // Wait up to 8 s for 256 KB to buffer
         int waited = 0;
         while (waited < 8000) {
             if (Files.exists(tempFile) && Files.size(tempFile) > 256_000) break;
-            if (downloadDone.get()) break; // download finished (maybe a small file)
+            if (downloadDone.get()) break;
             Thread.sleep(100);
             waited += 100;
         }
 
+        // Play from whichever file exists — both have .mp3 extension now
         Path playFrom = Files.exists(tempFile) ? tempFile : finalFile;
         if (Files.exists(playFrom)) {
             ThemeSongPlayer.playFile(playFrom);
@@ -245,22 +217,8 @@ public class YtPlayer {
         downloadThread.join(60_000);
     }
 
-    /**
-     * Resolves a fresh, playable direct audio-stream URL for {@code videoUrl}.
-     *
-     * <p>We re-initialise NewPipe on every call. This is intentional: the
-     * extractor caches internal YouTube state (player JS, cipher functions) that
-     * becomes stale after a few hours and causes "The page needs to be reloaded"
-     * errors. A fresh {@link YtDownloader} instance avoids reusing any such
-     * cached state from a previous session.</p>
-     *
-     * <p>We then send a lightweight HEAD request (via {@link HttpURLConnection},
-     * not {@code HttpClient}) to each candidate URL to skip dead or expired ones
-     * before returning the first live URL.</p>
-     */
     private String resolveAudioUrl(String videoUrl) throws Exception {
         NewPipe.init(new YtDownloader());
-
         StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, videoUrl);
 
         List<AudioStream> streams = info.getAudioStreams();
@@ -268,7 +226,7 @@ public class YtPlayer {
             throw new IOException("No audio streams found for: " + videoUrl);
         }
 
-        // Sort ascending by bitrate to minimise data usage on mobile.
+        // Sort ascending by bitrate — lowest bitrate first to save mobile data
         List<AudioStream> sorted = streams.stream()
                 .filter(s -> {
                     try { return s.getContent() != null && !s.getContent().isBlank(); }
@@ -283,29 +241,22 @@ public class YtPlayer {
             throw new IOException("All stream URLs were empty. YouTube may have blocked extraction.");
         }
 
-        // Verify each URL is reachable with a HEAD request (HttpURLConnection).
+        // Verify each URL with a HEAD request, return first live one
         for (AudioStream stream : sorted) {
             String url = stream.getContent();
             try {
                 HttpURLConnection head = YtDownloader.openConnection(url, "HEAD", null, null);
-                head.setConnectTimeout(5_000); // shorter timeout for probing
+                head.setConnectTimeout(5_000);
                 head.setReadTimeout(5_000);
                 int code = head.getResponseCode();
                 head.disconnect();
                 if (code < 400) return url;
-            } catch (Exception ignored) {
-                // timeout, connection refused, or any other error — skip to next URL
-            }
+            } catch (Exception ignored) {}
         }
 
-        // Fallback: return first URL without verification
         return sorted.get(0).getContent();
     }
 
-    /**
-     * Downloads the content at {@code url} to {@code dest} using chunked I/O.
-     * Uses {@link HttpURLConnection} for Android JRE compatibility.
-     */
     static void downloadToFile(String url, Path dest) throws Exception {
         HttpURLConnection conn = YtDownloader.openConnection(url, "GET", null, null);
         int code = conn.getResponseCode();
@@ -313,15 +264,12 @@ public class YtPlayer {
             conn.disconnect();
             throw new IOException("HTTP " + code + " downloading " + url);
         }
-
         try (InputStream  in  = new BufferedInputStream(conn.getInputStream(), 8192);
              OutputStream out = Files.newOutputStream(dest,
                      StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
             byte[] buf = new byte[8192];
             int n;
-            while ((n = in.read(buf)) != -1) {
-                out.write(buf, 0, n);
-            }
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
             out.flush();
         } finally {
             conn.disconnect();
@@ -331,7 +279,6 @@ public class YtPlayer {
     private void waitForPlayback(Path file) throws InterruptedException {
         long fileSizeBytes = 0;
         try { fileSizeBytes = Files.size(file); } catch (Exception ignored) {}
-        // ~128 kbps audio ≈ 16 KB/s
         long estimatedMs = (fileSizeBytes > 0) ? (fileSizeBytes / 16_000) * 1000L : 300_000L;
         long start = System.currentTimeMillis();
         while (System.currentTimeMillis() - start < estimatedMs) {
@@ -375,7 +322,7 @@ public class YtPlayer {
         }
     }
 
-    private static String sanitizeFilename(String name) {
+    static String sanitizeFilename(String name) {
         return name.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
     }
 
