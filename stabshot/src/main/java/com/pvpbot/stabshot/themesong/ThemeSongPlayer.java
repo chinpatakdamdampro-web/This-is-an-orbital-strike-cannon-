@@ -8,11 +8,12 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.sound.AbstractSoundInstance;
 import net.minecraft.client.sound.AudioStream;
+import net.minecraft.client.sound.OggAudioStream;
 import net.minecraft.client.sound.SoundLoader;
+import net.minecraft.client.sound.SoundInstance;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvent;
 import net.minecraft.util.Identifier;
-import net.minecraft.client.sound.SoundInstance.AttenuationType;
 
 import javax.sound.sampled.AudioFormat;
 import java.io.*;
@@ -22,44 +23,30 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * Plays audio files by feeding them into Minecraft's own SoundManager.
- *
- * This is the correct approach for all platforms including Android launchers
- * (ZalithLauncher, PojavLauncher, MojoLauncher) because Minecraft's SoundManager
- * already has a working OpenAL context set up — we just provide a custom
- * AudioStream that reads from disk instead of a resource pack.
- *
- * MP3 is decoded frame-by-frame via JLayer into PCM and fed through a custom
- * AudioStream implementation. OGG uses Minecraft's built-in OggAudioStream.
- *
- * Loop mode works by a background thread that sleeps for the song's estimated
- * duration then re-submits the SoundInstance to the SoundManager — identical
- * to how the original working version operated.
- */
 @Environment(EnvType.CLIENT)
 public class ThemeSongPlayer {
 
     public static final String SONGS_FOLDER = "stabshot/songs";
 
-    private static final Identifier  DUMMY_ID    = Identifier.of("stabshot", "dummy");
-    private static final SoundEvent  DUMMY_EVENT = SoundEvent.of(DUMMY_ID);
+    // Use Fabric's built-in empty sound as our dummy — no sounds.json entry needed
+    private static final Identifier DUMMY_ID    = FabricSoundInstance.EMPTY_SOUND;
+    private static final SoundEvent DUMMY_EVENT = SoundEvent.of(DUMMY_ID);
 
-    private static DiskSoundInstance currentInstance = null;
-    private static String            currentSong     = null;
-    private static boolean           playing         = false;
-    private static boolean           looping         = false;
-    private static Thread            loopThread      = null;
-    private static final AtomicBoolean loopActive    = new AtomicBoolean(false);
+    private static DiskSoundInstance  currentInstance = null;
+    private static String             currentSong     = null;
+    private static boolean            playing         = false;
+    private static boolean            looping         = false;
+    private static Thread             loopThread      = null;
+    private static final AtomicBoolean loopActive     = new AtomicBoolean(false);
 
     // ── Public API ────────────────────────────────────────────────────────────
 
     public static String play(String name, boolean loop) {
         stop();
 
-        Path songsDir = getSongsDir();
-        Path   file = null;
-        String ext  = null;
+        Path   songsDir = getSongsDir();
+        Path   file     = null;
+        String ext      = null;
         for (String e : new String[]{"ogg", "mp3"}) {
             Path candidate = songsDir.resolve(name + "." + e);
             if (Files.exists(candidate)) { file = candidate; ext = e; break; }
@@ -84,7 +71,7 @@ public class ThemeSongPlayer {
             loopActive.set(true);
             loopThread = new Thread(() -> {
                 while (loopActive.get()) {
-                    // Stop whatever is currently playing
+                    // Stop current instance before starting next
                     client.execute(() -> {
                         synchronized (ThemeSongPlayer.class) {
                             if (currentInstance != null) {
@@ -113,7 +100,6 @@ public class ThemeSongPlayer {
             }, "StabShot-LoopThread");
             loopThread.setDaemon(true);
             loopThread.start();
-
         } else {
             DiskSoundInstance inst = new DiskSoundInstance(fFile, fExt);
             client.execute(() -> {
@@ -135,12 +121,8 @@ public class ThemeSongPlayer {
         return null;
     }
 
-    /**
-     * Used by YtPlayer to play a cached audio file through the same MC sound engine.
-     */
     public static void playFile(Path file) {
         stop();
-
         MinecraftClient client = MinecraftClient.getInstance();
         if (client == null) return;
 
@@ -153,9 +135,7 @@ public class ThemeSongPlayer {
 
         DiskSoundInstance inst = new DiskSoundInstance(file, ext);
         client.execute(() -> {
-            synchronized (ThemeSongPlayer.class) {
-                currentInstance = inst;
-            }
+            synchronized (ThemeSongPlayer.class) { currentInstance = inst; }
             client.getSoundManager().play(inst);
         });
     }
@@ -209,7 +189,7 @@ public class ThemeSongPlayer {
         return dir;
     }
 
-    // ── Duration estimation (same logic as original) ──────────────────────────
+    // ── Duration estimation ───────────────────────────────────────────────────
 
     private static long estimateDurationMs(Path file, String ext) {
         try {
@@ -225,16 +205,14 @@ public class ThemeSongPlayer {
                     return Files.size(file) * 8000L / bitrate;
                 }
             } else {
-                // OGG: use Minecraft's OggAudioStream to measure total PCM bytes
                 try (InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
-                    net.minecraft.client.sound.OggAudioStream ogg =
-                            new net.minecraft.client.sound.OggAudioStream(in);
-                    AudioFormat fmt = ogg.getFormat();
+                    OggAudioStream ogg = new OggAudioStream(in);
+                    AudioFormat fmt    = ogg.getFormat();
                     int sr = (int) fmt.getSampleRate();
                     int ch = fmt.getChannels();
                     long totalBytes = 0L;
                     ByteBuffer buf;
-                    while ((buf = ogg.getBuffer(8192)) != null && buf.remaining() > 0) {
+                    while ((buf = ogg.read(8192)) != null && buf.remaining() > 0) {
                         totalBytes += buf.remaining();
                     }
                     ogg.close();
@@ -247,7 +225,7 @@ public class ThemeSongPlayer {
         }
     }
 
-    // ── DiskSoundInstance — feeds audio from disk into MC's SoundManager ──────
+    // ── DiskSoundInstance ─────────────────────────────────────────────────────
 
     @Environment(EnvType.CLIENT)
     static class DiskSoundInstance extends AbstractSoundInstance implements FabricSoundInstance {
@@ -256,7 +234,7 @@ public class ThemeSongPlayer {
         private final String ext;
 
         DiskSoundInstance(Path filePath, String ext) {
-            super(DUMMY_EVENT, SoundCategory.MASTER, net.minecraft.util.math.random.Random.create());
+            super(DUMMY_EVENT, SoundCategory.MASTER, SoundInstance.createRandom());
             this.filePath        = filePath;
             this.ext             = ext;
             this.volume          = 1.0f;
@@ -264,36 +242,38 @@ public class ThemeSongPlayer {
             this.repeat          = false;
             this.repeatDelay     = 0;
             this.relative        = true;
-            this.attenuationType = AttenuationType.NONE;
+            this.attenuationType = SoundInstance.AttenuationType.NONE;
         }
 
         @Override
-        public CompletableFuture<AudioStream> getAudioStream(SoundLoader loader, Identifier id, boolean repeatInstantly) {
+        public CompletableFuture<AudioStream> getAudioStream(SoundLoader loader,
+                                                              Identifier id,
+                                                              boolean repeatInstantly) {
             try {
                 InputStream in = new BufferedInputStream(Files.newInputStream(filePath));
                 AudioStream stream = "mp3".equals(ext)
                         ? new Mp3AudioStream(in)
-                        : new net.minecraft.client.sound.OggAudioStream(in);
+                        : new OggAudioStream(in);
                 return CompletableFuture.completedFuture(stream);
             } catch (IOException e) {
                 return CompletableFuture.failedFuture(
-                        new RuntimeException("StabShot: can't open audio: " + filePath + " — " + e.getMessage(), e));
+                        new RuntimeException("StabShot: can't open: " + filePath + " — " + e.getMessage(), e));
             }
         }
     }
 
-    // ── Mp3AudioStream — JLayer MP3 → PCM for MC's sound engine ──────────────
+    // ── Mp3AudioStream ────────────────────────────────────────────────────────
 
     @Environment(EnvType.CLIENT)
     static class Mp3AudioStream implements AudioStream {
 
         private final Bitstream bitstream;
         private final Decoder   decoder;
-        private byte[] overflow    = new byte[0];
-        private int    overflowPos = 0;
-        private int    sampleRate  = 44100;
-        private int    channels    = 2;
-        private boolean headerRead = false;
+        private byte[]  overflow    = new byte[0];
+        private int     overflowPos = 0;
+        private int     sampleRate  = 44100;
+        private int     channels    = 2;
+        private boolean headerRead  = false;
 
         Mp3AudioStream(InputStream in) {
             this.bitstream = new Bitstream(in);
@@ -301,15 +281,14 @@ public class ThemeSongPlayer {
         }
 
         @Override
-        public ByteBuffer getBuffer(int size) throws IOException {
-            // Fill overflow buffer until we have enough data or EOF
+        public ByteBuffer read(int size) throws IOException {
             while (overflow.length - overflowPos < size && decodeNextFrame()) {}
 
             int available = overflow.length - overflowPos;
             if (available <= 0) return ByteBuffer.allocateDirect(0);
 
-            int      toReturn = Math.min(size, available);
-            ByteBuffer buf    = ByteBuffer.allocateDirect(toReturn);
+            int        toReturn = Math.min(size, available);
+            ByteBuffer buf      = ByteBuffer.allocateDirect(toReturn);
             buf.put(overflow, overflowPos, toReturn);
             overflowPos += toReturn;
             buf.flip();
@@ -323,7 +302,7 @@ public class ThemeSongPlayer {
 
                 if (!headerRead) {
                     sampleRate = header.frequency();
-                    channels   = (header.mode() == 3) ? 1 : 2; // mode 3 = mono
+                    channels   = (header.mode() == 3) ? 1 : 2;
                     headerRead = true;
                 }
 
@@ -348,7 +327,7 @@ public class ThemeSongPlayer {
                 return true;
 
             } catch (BitstreamException e) {
-                if (e.getErrorCode() == 260) return false; // 260 = BitstreamErrors.STREAM_EOF
+                if (e.getErrorCode() == 260) return false; // STREAM_EOF
                 throw new IOException("MP3 bitstream error: " + e.getMessage(), e);
             } catch (DecoderException e) {
                 throw new IOException("MP3 decoder error: " + e.getMessage(), e);
