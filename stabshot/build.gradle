@@ -32,10 +32,6 @@ dependencies {
     // JLayer — pure-Java MP3 decoder. On mavenCentral so include() works fine.
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // LWJGL — already present at runtime via Minecraft. compileOnly so we never bundle it.
-    compileOnly "org.lwjgl:lwjgl-openal:3.3.3"
-    compileOnly "org.lwjgl:lwjgl-stb:3.3.3"
-
     // NewPipe Extractor.
     // Exact JitPack coordinates (confirmed from https://jitpack.io/p/teamnewpipe/newpipeextractor):
     //   groupId:    com.github.teamnewpipe
