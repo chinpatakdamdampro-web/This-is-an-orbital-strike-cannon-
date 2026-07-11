@@ -3,80 +3,64 @@ package com.pvpbot.stabshot.themesong;
 import javazoom.jl.decoder.*;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.fabricmc.fabric.api.client.sound.v1.FabricSoundInstance;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.sound.AbstractSoundInstance;
+import net.minecraft.client.sound.AudioStream;
+import net.minecraft.client.sound.SoundLoader;
+import net.minecraft.sound.SoundCategory;
+import net.minecraft.sound.SoundEvent;
+import net.minecraft.util.Identifier;
+import net.minecraft.client.sound.SoundInstance.AttenuationType;
 
-import javax.sound.sampled.*;
+import javax.sound.sampled.AudioFormat;
 import java.io.*;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.ShortBuffer;
 import java.nio.file.*;
 import java.util.*;
-import java.util.concurrent.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Cross-platform audio player for MP3 and OGG files.
+ * Plays audio files by feeding them into Minecraft's own SoundManager.
  *
- * TWO BACKENDS — chosen automatically at first playback:
+ * This is the correct approach for all platforms including Android launchers
+ * (ZalithLauncher, PojavLauncher, MojoLauncher) because Minecraft's SoundManager
+ * already has a working OpenAL context set up — we just provide a custom
+ * AudioStream that reads from disk instead of a resource pack.
  *
- *  1. javax.sound (desktop — Windows/Linux/macOS)
- *     Uses SourceDataLine + JLayer for MP3, AudioSystem for OGG.
- *     Only used when a real, working audio line can be opened AND
- *     we are NOT on a known Android/mobile launcher.
+ * MP3 is decoded frame-by-frame via JLayer into PCM and fed through a custom
+ * AudioStream implementation. OGG uses Minecraft's built-in OggAudioStream.
  *
- *  2. OpenAL streaming (Android — ZalithLauncher, PojavLauncher, MojoLauncher)
- *     Decodes audio to PCM on a background thread, feeds it to OpenAL
- *     buffers on a dedicated AL thread that owns its own AL context share.
- *     Does NOT use mc.execute() — AL calls stay on the AL thread.
- *
- * WHY we can't trust getMixerInfo() on Android:
- *   Android JREs (including the ones in ZalithLauncher 1) stub out
- *   javax.sound.sampled.  getMixerInfo() returns fake mixers that open
- *   without error but silently discard all written audio.  This caused
- *   songs to "play" (no exception) but produce no sound and cut off
- *   randomly when the stub's internal buffer filled up.
- *   We detect this by: checking known Android JRE vendor strings, then
- *   attempting a real test-write through a tiny SourceDataLine.
+ * Loop mode works by a background thread that sleeps for the song's estimated
+ * duration then re-submits the SoundInstance to the SoundManager — identical
+ * to how the original working version operated.
  */
 @Environment(EnvType.CLIENT)
 public class ThemeSongPlayer {
 
     public static final String SONGS_FOLDER = "stabshot/songs";
 
-    // ── Playback state ────────────────────────────────────────────────────────
-    private static volatile Thread         playThread;
-    private static volatile SourceDataLine currentLine;
-    private static volatile String         currentSong;
-    private static volatile boolean        playing   = false;
-    private static volatile boolean        looping   = false;
-    private static final    AtomicBoolean  loopActive = new AtomicBoolean(false);
+    private static final Identifier  DUMMY_ID    = Identifier.of("stabshot", "dummy");
+    private static final SoundEvent  DUMMY_EVENT = SoundEvent.of(DUMMY_ID);
 
-    // ── Backend selection ─────────────────────────────────────────────────────
-    private static volatile boolean useOpenAlFallback = false;
-    private static volatile boolean backendChecked    = false;
-
-    // ── OpenAL streaming ──────────────────────────────────────────────────────
-    private static final int     AL_BUFFER_COUNT = 8;   // more buffers = less starvation risk
-    private static final int     AL_CHUNK_BYTES  = 32768; // 32 KB per buffer
-    private static final byte[]  POISON_PILL     = new byte[0];
-
-    private static volatile int                        alSource     = 0;
-    private static volatile int[]                      alBuffers    = null;
-    private static volatile LinkedBlockingDeque<byte[]> pcmQueue;
-    private static volatile int                        alSampleRate = 44100;
-    private static volatile int                        alChannels   = 2;
-    private static volatile Thread                     alThread;    // owns the AL context
+    private static DiskSoundInstance currentInstance = null;
+    private static String            currentSong     = null;
+    private static boolean           playing         = false;
+    private static boolean           looping         = false;
+    private static Thread            loopThread      = null;
+    private static final AtomicBoolean loopActive    = new AtomicBoolean(false);
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    public static String play(final String name, final boolean loop) {
+    public static String play(String name, boolean loop) {
         stop();
 
-        final Path songsDir = getSongsDir();
+        Path songsDir = getSongsDir();
         Path   file = null;
         String ext  = null;
-        for (String e : new String[]{"mp3", "ogg"}) {
+        for (String e : new String[]{"ogg", "mp3"}) {
             Path candidate = songsDir.resolve(name + "." + e);
             if (Files.exists(candidate)) { file = candidate; ext = e; break; }
         }
@@ -86,87 +70,116 @@ public class ThemeSongPlayer {
                  + "§7Available: §f" + String.join(", ", getSongNames());
         }
 
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) return "Client not ready.";
+
+        currentSong = name;
+        playing     = true;
+        looping     = loop;
+
         final Path   fFile = file;
         final String fExt  = ext;
-        currentSong = name;
-        looping     = loop;
-        loopActive.set(true);
-        ensureBackendChecked();
 
-        playThread = new Thread(() -> {
-            try {
-                do {
-                    playing = true;
-                    playOne(fFile, fExt);
-                } while (loop && loopActive.get());
-            } catch (Exception e) {
-                if (loopActive.get()) {
-                    System.err.println("[StabShot] Playback error: " + e.getMessage());
-                    e.printStackTrace();
+        if (loop) {
+            loopActive.set(true);
+            loopThread = new Thread(() -> {
+                while (loopActive.get()) {
+                    // Stop whatever is currently playing
+                    client.execute(() -> {
+                        synchronized (ThemeSongPlayer.class) {
+                            if (currentInstance != null) {
+                                client.getSoundManager().stop(currentInstance);
+                            }
+                        }
+                    });
+
+                    long durationMs = estimateDurationMs(fFile, fExt);
+                    if (durationMs <= 0) durationMs = 3000L;
+
+                    DiskSoundInstance inst = new DiskSoundInstance(fFile, fExt);
+                    client.execute(() -> {
+                        synchronized (ThemeSongPlayer.class) {
+                            currentInstance = inst;
+                        }
+                        client.getSoundManager().play(inst);
+                    });
+
+                    try {
+                        Thread.sleep(durationMs);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
                 }
-            } finally {
-                playing = false;
-                if (!loopActive.get()) currentSong = null;
-            }
-        }, "StabShot-PlayThread");
-        playThread.setDaemon(false);
-        playThread.start();
+            }, "StabShot-LoopThread");
+            loopThread.setDaemon(true);
+            loopThread.start();
+
+        } else {
+            DiskSoundInstance inst = new DiskSoundInstance(fFile, fExt);
+            client.execute(() -> {
+                try {
+                    synchronized (ThemeSongPlayer.class) {
+                        currentInstance = inst;
+                    }
+                    client.getSoundManager().play(inst);
+                } catch (Exception e) {
+                    playing = false;
+                    if (client.inGameHud != null) {
+                        client.inGameHud.getChatHud().addMessage(
+                                net.minecraft.text.Text.literal("§c[StabShot] Play error: " + e.getMessage()));
+                    }
+                }
+            });
+        }
+
         return null;
     }
 
-    public static void playFile(final Path file) {
+    /**
+     * Used by YtPlayer to play a cached audio file through the same MC sound engine.
+     */
+    public static void playFile(Path file) {
         stop();
-        currentSong = file.getFileName().toString();
-        looping     = false;
-        loopActive.set(true);
-        playing     = true;
-        ensureBackendChecked();
 
-        playThread = new Thread(() -> {
-            try {
-                String lower = file.getFileName().toString().toLowerCase();
-                String ext   = lower.endsWith(".mp3") ? "mp3" : "ogg";
-                playOne(file, ext);
-            } catch (Exception e) {
-                if (loopActive.get()) {
-                    System.err.println("[StabShot] playFile error: " + e.getMessage());
-                    e.printStackTrace();
-                }
-            } finally {
-                playing = false;
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) return;
+
+        String lower = file.getFileName().toString().toLowerCase();
+        String ext   = lower.endsWith(".mp3") ? "mp3" : "ogg";
+
+        currentSong = file.getFileName().toString();
+        playing     = true;
+        looping     = false;
+
+        DiskSoundInstance inst = new DiskSoundInstance(file, ext);
+        client.execute(() -> {
+            synchronized (ThemeSongPlayer.class) {
+                currentInstance = inst;
             }
-        }, "StabShot-FilePlayThread");
-        playThread.setDaemon(false);
-        playThread.start();
+            client.getSoundManager().play(inst);
+        });
     }
 
     public static void stop() {
         loopActive.set(false);
-        playing = false;
-        looping = false;
 
-        // Desktop
-        SourceDataLine line = currentLine;
-        if (line != null) {
-            try { line.stop(); line.close(); } catch (Exception ignored) {}
-            currentLine = null;
+        if (loopThread != null) {
+            loopThread.interrupt();
+            loopThread = null;
         }
 
-        // OpenAL
-        LinkedBlockingDeque<byte[]> q = pcmQueue;
-        if (q != null) { q.clear(); q.offer(POISON_PILL); }
-
-        Thread al = alThread;
-        if (al != null) { al.interrupt(); alThread = null; }
-
-        alSource  = 0;
-        alBuffers = null;
-        pcmQueue  = null;
-
-        Thread t = playThread;
-        if (t != null) { t.interrupt(); playThread = null; }
+        if (currentInstance != null) {
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client != null) {
+                DiskSoundInstance inst = currentInstance;
+                client.execute(() -> client.getSoundManager().stop(inst));
+            }
+            currentInstance = null;
+        }
 
         currentSong = null;
+        playing     = false;
+        looping     = false;
     }
 
     public static boolean isPlaying()      { return playing; }
@@ -179,7 +192,7 @@ public class ThemeSongPlayer {
         if (!Files.exists(dir)) return names;
         File[] files = dir.toFile().listFiles(f -> {
             String n = f.getName().toLowerCase();
-            return f.isFile() && (n.endsWith(".mp3") || n.endsWith(".ogg"));
+            return f.isFile() && (n.endsWith(".ogg") || n.endsWith(".mp3"));
         });
         if (files == null) return names;
         for (File f : files) {
@@ -196,373 +209,162 @@ public class ThemeSongPlayer {
         return dir;
     }
 
-    // ── Backend selection ─────────────────────────────────────────────────────
+    // ── Duration estimation (same logic as original) ──────────────────────────
 
-    private static void ensureBackendChecked() {
-        if (backendChecked) return;
-        useOpenAlFallback = !isRealJavaSoundAvailable();
-        backendChecked    = true;
-        System.out.println("[StabShot] Audio backend: " + (useOpenAlFallback ? "OpenAL" : "javax.sound"));
-    }
-
-    /**
-     * Returns true ONLY if:
-     *   1. We are not on a known Android/mobile JRE, AND
-     *   2. We can actually open and write to a SourceDataLine without error.
-     *
-     * Android JREs stub javax.sound — getMixerInfo() lies, returns fake mixers
-     * that accept writes silently but produce no audio.
-     */
-    private static boolean isRealJavaSoundAvailable() {
-        // Fast-fail on known Android/mobile JRE vendor strings
-        String vendor = System.getProperty("java.vendor", "").toLowerCase();
-        String vmName = System.getProperty("java.vm.name", "").toLowerCase();
-        if (vendor.contains("android") || vmName.contains("android")
-                || vendor.contains("mobile") || vmName.contains("mobile")) {
-            return false;
-        }
-        // Also check for the Caciocavallo/AWT-Less JRE used by some Android launchers
-        String awtToolkit = System.getProperty("awt.toolkit", "").toLowerCase();
-        if (awtToolkit.contains("caciocavallo") || awtToolkit.contains("mobile")) {
-            return false;
-        }
-
-        // Try to actually open a real line and write 1 frame of silence.
-        // If this throws or produces 0 bytes written, the backend is fake.
+    private static long estimateDurationMs(Path file, String ext) {
         try {
-            AudioFormat fmt = new AudioFormat(44100, 16, 2, true, false);
-            DataLine.Info info = new DataLine.Info(SourceDataLine.class, fmt);
-            if (!AudioSystem.isLineSupported(info)) return false;
-            SourceDataLine testLine = (SourceDataLine) AudioSystem.getLine(info);
-            testLine.open(fmt, 4096);
-            testLine.start();
-            byte[] silence = new byte[4]; // 1 stereo frame of silence
-            int written = testLine.write(silence, 0, silence.length);
-            testLine.stop();
-            testLine.close();
-            return written > 0;
-        } catch (Throwable t) {
-            return false;
+            if ("mp3".equals(ext)) {
+                try (InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
+                    Bitstream bs    = new Bitstream(in);
+                    Header    first = bs.readFrame();
+                    if (first == null) return 0L;
+                    int bitrate = first.bitrate();
+                    bs.closeFrame();
+                    bs.close();
+                    if (bitrate <= 0) return 0L;
+                    return Files.size(file) * 8000L / bitrate;
+                }
+            } else {
+                // OGG: use Minecraft's OggAudioStream to measure total PCM bytes
+                try (InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
+                    net.minecraft.client.sound.OggAudioStream ogg =
+                            new net.minecraft.client.sound.OggAudioStream(in);
+                    AudioFormat fmt = ogg.getFormat();
+                    int sr = (int) fmt.getSampleRate();
+                    int ch = fmt.getChannels();
+                    long totalBytes = 0L;
+                    ByteBuffer buf;
+                    while ((buf = ogg.getBuffer(8192)) != null && buf.remaining() > 0) {
+                        totalBytes += buf.remaining();
+                    }
+                    ogg.close();
+                    if (sr <= 0 || ch <= 0) return 0L;
+                    return totalBytes * 1000L / ((long)(sr * ch) * 2L);
+                }
+            }
+        } catch (Exception e) {
+            return 0L;
         }
     }
 
-    private static void playOne(Path file, String ext) throws Exception {
-        if (useOpenAlFallback) {
-            if ("mp3".equals(ext)) playMp3OpenAl(file);
-            else                   playOggOpenAl(file);
-        } else {
+    // ── DiskSoundInstance — feeds audio from disk into MC's SoundManager ──────
+
+    @Environment(EnvType.CLIENT)
+    static class DiskSoundInstance extends AbstractSoundInstance implements FabricSoundInstance {
+
+        private final Path   filePath;
+        private final String ext;
+
+        DiskSoundInstance(Path filePath, String ext) {
+            super(DUMMY_EVENT, SoundCategory.MASTER, net.minecraft.util.math.random.Random.create());
+            this.filePath        = filePath;
+            this.ext             = ext;
+            this.volume          = 1.0f;
+            this.pitch           = 1.0f;
+            this.repeat          = false;
+            this.repeatDelay     = 0;
+            this.relative        = true;
+            this.attenuationType = AttenuationType.NONE;
+        }
+
+        @Override
+        public CompletableFuture<AudioStream> getAudioStream(SoundLoader loader, Identifier id, boolean repeatInstantly) {
             try {
-                if ("mp3".equals(ext)) playMp3(file);
-                else                   playOgg(file);
-            } catch (LineUnavailableException lue) {
-                // Line opened fine in test but failed for real — switch permanently
-                useOpenAlFallback = true;
-                System.err.println("[StabShot] javax.sound line unavailable at runtime, switching to OpenAL: " + lue.getMessage());
-                if ("mp3".equals(ext)) playMp3OpenAl(file);
-                else                   playOggOpenAl(file);
+                InputStream in = new BufferedInputStream(Files.newInputStream(filePath));
+                AudioStream stream = "mp3".equals(ext)
+                        ? new Mp3AudioStream(in)
+                        : new net.minecraft.client.sound.OggAudioStream(in);
+                return CompletableFuture.completedFuture(stream);
+            } catch (IOException e) {
+                return CompletableFuture.failedFuture(
+                        new RuntimeException("StabShot: can't open audio: " + filePath + " — " + e.getMessage(), e));
             }
         }
     }
 
-    // ── Desktop: javax.sound ──────────────────────────────────────────────────
+    // ── Mp3AudioStream — JLayer MP3 → PCM for MC's sound engine ──────────────
 
-    private static void playMp3(Path file) throws Exception {
-        try (InputStream fis = new BufferedInputStream(Files.newInputStream(file))) {
-            Bitstream      bitstream = new Bitstream(fis);
-            Decoder        decoder   = new Decoder();
-            SourceDataLine line      = null;
+    @Environment(EnvType.CLIENT)
+    static class Mp3AudioStream implements AudioStream {
+
+        private final Bitstream bitstream;
+        private final Decoder   decoder;
+        private byte[] overflow    = new byte[0];
+        private int    overflowPos = 0;
+        private int    sampleRate  = 44100;
+        private int    channels    = 2;
+        private boolean headerRead = false;
+
+        Mp3AudioStream(InputStream in) {
+            this.bitstream = new Bitstream(in);
+            this.decoder   = new Decoder();
+        }
+
+        @Override
+        public ByteBuffer getBuffer(int size) throws IOException {
+            // Fill overflow buffer until we have enough data or EOF
+            while (overflow.length - overflowPos < size && decodeNextFrame()) {}
+
+            int available = overflow.length - overflowPos;
+            if (available <= 0) return ByteBuffer.allocateDirect(0);
+
+            int      toReturn = Math.min(size, available);
+            ByteBuffer buf    = ByteBuffer.allocateDirect(toReturn);
+            buf.put(overflow, overflowPos, toReturn);
+            overflowPos += toReturn;
+            buf.flip();
+            return buf;
+        }
+
+        private boolean decodeNextFrame() throws IOException {
             try {
-                while (loopActive.get()) {
-                    Header header;
-                    try { header = bitstream.readFrame(); } catch (BitstreamException e) { break; }
-                    if (header == null) break;
+                Header header = bitstream.readFrame();
+                if (header == null) return false;
 
-                    SampleBuffer output = (SampleBuffer) decoder.decodeFrame(header, bitstream);
-                    if (line == null) {
-                        int sr = output.getSampleFrequency(), ch = output.getChannelCount();
-                        AudioFormat fmt = new AudioFormat(AudioFormat.Encoding.PCM_SIGNED, sr, 16, ch, ch * 2, sr, false);
-                        line = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, fmt));
-                        line.open(fmt);
-                        line.start();
-                        currentLine = line;
-                    }
-
-                    short[] samples = output.getBuffer();
-                    int     count   = output.getBufferLength();
-                    byte[]  bytes   = new byte[count * 2];
-                    for (int i = 0; i < count; i++) {
-                        bytes[i * 2]     = (byte)  (samples[i] & 0xFF);
-                        bytes[i * 2 + 1] = (byte) ((samples[i] >> 8) & 0xFF);
-                    }
-                    if (loopActive.get()) line.write(bytes, 0, bytes.length);
-                    bitstream.closeFrame();
-                }
-                if (line != null && loopActive.get()) line.drain();
-            } finally {
-                if (line != null) { try { line.stop(); line.close(); } catch (Exception ignored) {} }
-                currentLine = null;
-                try { bitstream.close(); } catch (Exception ignored) {}
-            }
-        }
-    }
-
-    private static void playOgg(Path file) throws Exception {
-        try (AudioInputStream raw = AudioSystem.getAudioInputStream(file.toFile())) {
-            AudioFormat base = raw.getFormat();
-            AudioFormat decoded = new AudioFormat(AudioFormat.Encoding.PCM_SIGNED,
-                    base.getSampleRate(), 16, base.getChannels(), base.getChannels() * 2, base.getSampleRate(), false);
-            try (AudioInputStream pcm = AudioSystem.getAudioInputStream(decoded, raw)) {
-                SourceDataLine line = (SourceDataLine) AudioSystem.getLine(new DataLine.Info(SourceDataLine.class, decoded));
-                line.open(decoded); line.start(); currentLine = line;
-                byte[] buf = new byte[4096]; int n;
-                while (loopActive.get() && (n = pcm.read(buf, 0, buf.length)) != -1) {
-                    if (loopActive.get()) line.write(buf, 0, n);
-                }
-                if (loopActive.get()) line.drain();
-                try { line.stop(); line.close(); } catch (Exception ignored) {}
-                currentLine = null;
-            }
-        }
-    }
-
-    // ── OpenAL streaming ──────────────────────────────────────────────────────
-    //
-    // Architecture:
-    //   playMp3OpenAl / playOggOpenAl   — decoder thread (this thread)
-    //     decodes audio → PCM chunks → pcmQueue
-    //   alThread                        — AL thread
-    //     creates its own AL context, owns all AL object lifetimes,
-    //     pumps buffers from pcmQueue into OpenAL continuously.
-    //
-    // We do NOT bounce AL calls through mc.execute().  Doing so on ZalithLauncher
-    // caused silent playback because the MC execute queue is not drained on every
-    // tick there, starving the AL buffers.  Instead we create a dedicated thread
-    // that calls alcMakeContextCurrent to share Minecraft's AL device, then
-    // manages all AL state itself.
-
-    private static void playMp3OpenAl(Path file) throws Exception {
-        alSampleRate = 44100;
-        alChannels   = 2;
-        pcmQueue     = new LinkedBlockingDeque<>(128);
-        final LinkedBlockingDeque<byte[]> queue = pcmQueue;
-
-        startAlThread(queue);
-
-        try (InputStream fis = new BufferedInputStream(Files.newInputStream(file))) {
-            Bitstream bitstream  = new Bitstream(fis);
-            Decoder   decoder    = new Decoder();
-            boolean   firstFrame = true;
-            ByteArrayOutputStream acc = new ByteArrayOutputStream(AL_CHUNK_BYTES * 2);
-            try {
-                while (loopActive.get()) {
-                    Header header;
-                    try { header = bitstream.readFrame(); } catch (BitstreamException e) { break; }
-                    if (header == null) break;
-
-                    SampleBuffer buf = (SampleBuffer) decoder.decodeFrame(header, bitstream);
-                    if (firstFrame) {
-                        alSampleRate = buf.getSampleFrequency();
-                        alChannels   = buf.getChannelCount();
-                        firstFrame   = false;
-                    }
-                    short[] samples = buf.getBuffer();
-                    int     count   = buf.getBufferLength();
-                    for (int i = 0; i < count; i++) {
-                        acc.write( samples[i] & 0xFF);
-                        acc.write((samples[i] >> 8) & 0xFF);
-                    }
-                    if (acc.size() >= AL_CHUNK_BYTES) {
-                        if (!offerChunk(queue, acc.toByteArray())) break;
-                        acc.reset();
-                    }
-                    bitstream.closeFrame();
-                }
-                if (acc.size() > 0) offerChunk(queue, acc.toByteArray());
-            } finally {
-                try { bitstream.close(); } catch (Exception ignored) {}
-            }
-        }
-        queue.offer(POISON_PILL, 5, TimeUnit.SECONDS);
-        joinAlThread();
-    }
-
-    private static void playOggOpenAl(Path file) throws Exception {
-        byte[]     bytes  = Files.readAllBytes(file);
-        ByteBuffer fileBuf = ByteBuffer.allocateDirect(bytes.length).put(bytes);
-        fileBuf.flip();
-
-        int[] error  = {0};
-        long  vorbis = org.lwjgl.stb.STBVorbis.stb_vorbis_open_memory(fileBuf, error, null);
-        if (vorbis == 0L) throw new IOException("STBVorbis failed on: " + file + " err=" + error[0]);
-
-        try {
-            try (org.lwjgl.stb.STBVorbisInfo info = org.lwjgl.stb.STBVorbisInfo.malloc()) {
-                org.lwjgl.stb.STBVorbis.stb_vorbis_get_info(vorbis, info);
-                alSampleRate = info.sample_rate();
-                alChannels   = info.channels();
-            }
-
-            pcmQueue = new LinkedBlockingDeque<>(128);
-            final LinkedBlockingDeque<byte[]> queue = pcmQueue;
-            startAlThread(queue);
-
-            int         samplesPerChunk = AL_CHUNK_BYTES / (alChannels * 2);
-            ShortBuffer shortBuf = ByteBuffer
-                    .allocateDirect(samplesPerChunk * alChannels * 2)
-                    .order(ByteOrder.nativeOrder()).asShortBuffer();
-
-            while (loopActive.get()) {
-                shortBuf.clear();
-                int decoded = org.lwjgl.stb.STBVorbis
-                        .stb_vorbis_get_samples_short_interleaved(vorbis, alChannels, shortBuf);
-                if (decoded <= 0) break;
-                int byteCount = decoded * alChannels * 2;
-                byte[] chunk  = new byte[byteCount];
-                for (int i = 0, j = 0; i < decoded * alChannels; i++, j += 2) {
-                    short s = shortBuf.get(i);
-                    chunk[j]     = (byte)  (s & 0xFF);
-                    chunk[j + 1] = (byte) ((s >> 8) & 0xFF);
-                }
-                if (!offerChunk(queue, chunk)) break;
-            }
-            queue.offer(POISON_PILL, 5, TimeUnit.SECONDS);
-            joinAlThread();
-        } finally {
-            org.lwjgl.stb.STBVorbis.stb_vorbis_close(vorbis);
-        }
-    }
-
-    /**
-     * Starts the AL thread.  The thread:
-     *   1. Acquires Minecraft's AL device handle via alcGetContextsDevice on
-     *      the current context, then creates a NEW context that shares it.
-     *   2. Makes that context current on this thread.
-     *   3. Allocates AL source + buffers.
-     *   4. Pumps PCM from the queue into AL until the POISON_PILL arrives.
-     *   5. Drains remaining queued AL buffers until the source stops.
-     *   6. Cleans up AL objects and releases the context.
-     */
-    private static void startAlThread(LinkedBlockingDeque<byte[]> queue) throws InterruptedException {
-        CountDownLatch ready = new CountDownLatch(1);
-
-        alThread = new Thread(() -> {
-            long device  = 0L;
-            long context = 0L;
-            int  src     = 0;
-            int[] bufs   = null;
-
-            try {
-                // Share Minecraft's AL device by getting it from the current context
-                long mcContext = org.lwjgl.openal.ALC10.alcGetCurrentContext();
-                device  = org.lwjgl.openal.ALC10.alcGetContextsDevice(mcContext);
-                context = org.lwjgl.openal.ALC10.alcCreateContext(device, (java.nio.IntBuffer) null);
-                org.lwjgl.openal.ALC10.alcMakeContextCurrent(context);
-
-                bufs = new int[AL_BUFFER_COUNT];
-                org.lwjgl.openal.AL10.alGenBuffers(bufs);
-                src = org.lwjgl.openal.AL10.alGenSources();
-                org.lwjgl.openal.AL10.alSourcef(src, org.lwjgl.openal.AL10.AL_GAIN, 1.0f);
-                org.lwjgl.openal.AL10.alSource3f(src, org.lwjgl.openal.AL10.AL_POSITION, 0f, 0f, 0f);
-
-                alSource  = src;
-                alBuffers = bufs;
-                ready.countDown(); // signal that AL is set up
-
-                int alFormat = (alChannels == 2)
-                        ? org.lwjgl.openal.AL10.AL_FORMAT_STEREO16
-                        : org.lwjgl.openal.AL10.AL_FORMAT_MONO16;
-
-                boolean decoderDone = false;
-
-                // Prime: fill all buffers before starting playback
-                for (int b : bufs) {
-                    byte[] chunk = queue.poll(2, TimeUnit.SECONDS);
-                    if (chunk == null || chunk == POISON_PILL) { decoderDone = true; break; }
-                    ByteBuffer bb = ByteBuffer.allocateDirect(chunk.length).order(ByteOrder.LITTLE_ENDIAN).put(chunk);
-                    bb.flip();
-                    org.lwjgl.openal.AL10.alBufferData(b, alFormat, bb, alSampleRate);
-                    org.lwjgl.openal.AL10.alSourceQueueBuffers(src, b);
-                }
-                org.lwjgl.openal.AL10.alSourcePlay(src);
-
-                // Streaming loop
-                while (!Thread.currentThread().isInterrupted() && loopActive.get()) {
-                    // Unqueue processed buffers and refill them
-                    int processed = org.lwjgl.openal.AL10.alGetSourcei(src, org.lwjgl.openal.AL10.AL_BUFFERS_PROCESSED);
-                    for (int i = 0; i < processed; i++) {
-                        int bufferId = org.lwjgl.openal.AL10.alSourceUnqueueBuffers(src);
-                        if (decoderDone) continue; // no more data, just drain
-                        byte[] chunk = decoderDone ? null : queue.poll(100, TimeUnit.MILLISECONDS);
-                        if (chunk == null || chunk == POISON_PILL) { decoderDone = true; continue; }
-                        ByteBuffer bb = ByteBuffer.allocateDirect(chunk.length).order(ByteOrder.LITTLE_ENDIAN).put(chunk);
-                        bb.flip();
-                        org.lwjgl.openal.AL10.alBufferData(bufferId, alFormat, bb, alSampleRate);
-                        org.lwjgl.openal.AL10.alSourceQueueBuffers(src, bufferId);
-                    }
-
-                    // Restart source if it stalled due to buffer underrun
-                    int state     = org.lwjgl.openal.AL10.alGetSourcei(src, org.lwjgl.openal.AL10.AL_SOURCE_STATE);
-                    int nowQueued = org.lwjgl.openal.AL10.alGetSourcei(src, org.lwjgl.openal.AL10.AL_BUFFERS_QUEUED);
-                    if (state != org.lwjgl.openal.AL10.AL_PLAYING && nowQueued > 0) {
-                        org.lwjgl.openal.AL10.alSourcePlay(src);
-                    }
-
-                    // Exit when decoder is done and all queued buffers have played out
-                    if (decoderDone) {
-                        int remaining = org.lwjgl.openal.AL10.alGetSourcei(src, org.lwjgl.openal.AL10.AL_BUFFERS_QUEUED);
-                        int srcState  = org.lwjgl.openal.AL10.alGetSourcei(src, org.lwjgl.openal.AL10.AL_SOURCE_STATE);
-                        if (remaining == 0 || srcState == org.lwjgl.openal.AL10.AL_STOPPED) break;
-                    }
-
-                    Thread.sleep(20);
+                if (!headerRead) {
+                    sampleRate = header.frequency();
+                    channels   = (header.mode() == 3) ? 1 : 2; // mode 3 = mono
+                    headerRead = true;
                 }
 
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception e) {
-                System.err.println("[StabShot] AL thread error: " + e.getMessage());
-                e.printStackTrace();
-                ready.countDown(); // unblock caller even on error
-            } finally {
-                // Clean up AL objects on this thread (context is current here)
-                try {
-                    if (src  != 0) { org.lwjgl.openal.AL10.alSourceStop(src); org.lwjgl.openal.AL10.alDeleteSources(src); }
-                } catch (Exception ignored) {}
-                try {
-                    if (bufs != null) org.lwjgl.openal.AL10.alDeleteBuffers(bufs);
-                } catch (Exception ignored) {}
-                // Restore MC's context as current on this thread before we exit,
-                // then destroy ours.
-                try {
-                    long mcContext = org.lwjgl.openal.ALC10.alcGetCurrentContext();
-                    // Our context is current — switch back to none, then destroy
-                    org.lwjgl.openal.ALC10.alcMakeContextCurrent(0L);
-                    if (context != 0L) org.lwjgl.openal.ALC10.alcDestroyContext(context);
-                } catch (Exception ignored) {}
-                alSource  = 0;
-                alBuffers = null;
+                SampleBuffer output = (SampleBuffer) decoder.decodeFrame(header, bitstream);
+                bitstream.closeFrame();
+
+                short[] samples   = output.getBuffer();
+                int     count     = output.getBufferLength();
+                int     remaining = overflow.length - overflowPos;
+                byte[]  newBuf    = new byte[remaining + count * 2];
+
+                if (remaining > 0) System.arraycopy(overflow, overflowPos, newBuf, 0, remaining);
+
+                int off = remaining;
+                for (int i = 0; i < count; i++) {
+                    short s = samples[i];
+                    newBuf[off++] = (byte)  (s & 0xFF);
+                    newBuf[off++] = (byte) ((s >> 8) & 0xFF);
+                }
+                overflow    = newBuf;
+                overflowPos = 0;
+                return true;
+
+            } catch (BitstreamException e) {
+                if (e.getErrorCode() == 260) return false; // 260 = BitstreamErrors.STREAM_EOF
+                throw new IOException("MP3 bitstream error: " + e.getMessage(), e);
+            } catch (DecoderException e) {
+                throw new IOException("MP3 decoder error: " + e.getMessage(), e);
             }
-        }, "StabShot-AlThread");
-        alThread.setDaemon(true);
-        alThread.start();
-
-        // Wait up to 3 s for AL setup before the decoder starts feeding data
-        ready.await(3, TimeUnit.SECONDS);
-    }
-
-    private static void joinAlThread() throws InterruptedException {
-        Thread al = alThread;
-        if (al != null) {
-            al.join();
-            alThread = null;
         }
-    }
 
-    private static boolean offerChunk(LinkedBlockingDeque<byte[]> queue, byte[] chunk)
-            throws InterruptedException {
-        while (loopActive.get()) {
-            if (queue.offer(chunk, 50, TimeUnit.MILLISECONDS)) return true;
+        @Override
+        public AudioFormat getFormat() {
+            return new AudioFormat(
+                    AudioFormat.Encoding.PCM_SIGNED,
+                    sampleRate, 16, channels, channels * 2, sampleRate, false);
         }
-        return false;
+
+        @Override
+        public void close() throws IOException {
+            try { bitstream.close(); } catch (BitstreamException ignored) {}
+        }
     }
 }
