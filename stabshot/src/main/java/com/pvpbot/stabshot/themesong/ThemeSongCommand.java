@@ -1,8 +1,7 @@
 package com.pvpbot.stabshot.themesong;
 
-import com.mojang.brigadier.arguments.ArgumentType;
+import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
-import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.pvpbot.stabshot.youtube.YtCommand;
 import net.fabricmc.api.EnvType;
@@ -15,63 +14,84 @@ import net.minecraft.text.Text;
 import java.util.List;
 
 @Environment(EnvType.CLIENT)
-public class ThemeSongCommand
-{
+public class ThemeSongCommand {
+
     public static void register() {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
-
-            // /ts play [loop] <name>  /ts stop  /ts list
-            dispatcher.register(
-                (LiteralArgumentBuilder) ((LiteralArgumentBuilder) ((LiteralArgumentBuilder)
-                    ClientCommandManager.literal("ts")
-                        .then(((LiteralArgumentBuilder) ClientCommandManager.literal("play")
-                            .then(ClientCommandManager.literal("loop")
-                                .then(ClientCommandManager.argument("song", (ArgumentType) StringArgumentType.greedyString())
-                                    .executes(ctx -> execPlay((CommandContext<FabricClientCommandSource>) ctx, true)))))
-                            .then(ClientCommandManager.argument("song", (ArgumentType) StringArgumentType.greedyString())
-                                .executes(ctx -> execPlay((CommandContext<FabricClientCommandSource>) ctx, false)))))
-                    .then(ClientCommandManager.literal("stop").executes(ThemeSongCommand::execStop)))
-                    .then(ClientCommandManager.literal("list").executes(ThemeSongCommand::execList))
-            );
-
-            // /ts yt ...
+            registerDisk(dispatcher);
             YtCommand.register(dispatcher);
         });
     }
 
-    private static int execPlay(final CommandContext<FabricClientCommandSource> ctx, final boolean loop) {
-        final String song = StringArgumentType.getString(ctx, "song");
-        final String err  = ThemeSongPlayer.play(song, loop);
+    private static void registerDisk(CommandDispatcher<FabricClientCommandSource> dispatcher) {
+        // /ts play <song>  — play once
+        dispatcher.register(
+            ClientCommandManager.literal("ts")
+                .then(ClientCommandManager.literal("play")
+                    .then(ClientCommandManager.argument("song", StringArgumentType.greedyString())
+                        .executes(ctx -> execPlay(ctx, false))))
+        );
+
+        // /ts loop <song>  — loop (separate command avoids brigadier ambiguity)
+        dispatcher.register(
+            ClientCommandManager.literal("ts")
+                .then(ClientCommandManager.literal("loop")
+                    .then(ClientCommandManager.argument("song", StringArgumentType.greedyString())
+                        .executes(ctx -> execPlay(ctx, true))))
+        );
+
+        // /ts stop
+        dispatcher.register(
+            ClientCommandManager.literal("ts")
+                .then(ClientCommandManager.literal("stop")
+                    .executes(ThemeSongCommand::execStop))
+        );
+
+        // /ts list
+        dispatcher.register(
+            ClientCommandManager.literal("ts")
+                .then(ClientCommandManager.literal("list")
+                    .executes(ThemeSongCommand::execList))
+        );
+    }
+
+    private static int execPlay(CommandContext<FabricClientCommandSource> ctx, boolean loop) {
+        String song = StringArgumentType.getString(ctx, "song");
+        String err  = ThemeSongPlayer.play(song, loop);
         if (err != null) {
             ctx.getSource().sendFeedback(Text.literal("§c✘ " + err));
         } else {
-            final String loopInfo = loop ? " §7(looping — §f/ts stop §7to end)" : " §7(once)";
+            String loopInfo = loop ? " §7(looping — §f/ts stop §7to end)" : " §7(once)";
             ctx.getSource().sendFeedback(Text.literal("§a♪ Now playing: §f" + song + loopInfo));
         }
         return 1;
     }
 
-    private static int execStop(final CommandContext<FabricClientCommandSource> ctx) {
+    private static int execStop(CommandContext<FabricClientCommandSource> ctx) {
         if (!ThemeSongPlayer.isPlaying()) {
             ctx.getSource().sendFeedback(Text.literal("§7No song is currently playing."));
             return 0;
         }
-        final String was       = ThemeSongPlayer.getCurrentSong();
-        final boolean wasLooping = ThemeSongPlayer.isLooping();
+        String  was       = ThemeSongPlayer.getCurrentSong();
+        boolean wasLooping = ThemeSongPlayer.isLooping();
         ThemeSongPlayer.stop();
-        ctx.getSource().sendFeedback(Text.literal("§7■ Stopped: §f" + was + (wasLooping ? " §7(was looping)" : "")));
+        ctx.getSource().sendFeedback(Text.literal(
+            "§7■ Stopped: §f" + was + (wasLooping ? " §7(was looping)" : "")));
         return 1;
     }
 
-    private static int execList(final CommandContext<FabricClientCommandSource> ctx) {
-        final List<String> songs = ThemeSongPlayer.getSongNames();
+    private static int execList(CommandContext<FabricClientCommandSource> ctx) {
+        List<String> songs = ThemeSongPlayer.getSongNames();
         if (songs.isEmpty()) {
-            ctx.getSource().sendFeedback(Text.literal("§7No songs found. Add §f.ogg §7or §f.mp3 §7files to:\n§f" + ThemeSongPlayer.getSongsDir()));
+            ctx.getSource().sendFeedback(Text.literal(
+                "§7No songs found. Add §f.ogg §7or §f.mp3 §7files to:\n§f"
+                + ThemeSongPlayer.getSongsDir()));
             return 1;
         }
         ctx.getSource().sendFeedback(Text.literal("§6§lSongs (" + songs.size() + "):"));
         songs.forEach(s -> ctx.getSource().sendFeedback(Text.literal("§7 • §f" + s)));
-        ctx.getSource().sendFeedback(Text.literal("§7Usage: §f/ts play [loop] <name>"));
+        ctx.getSource().sendFeedback(Text.literal(
+            "§7Usage: §f/ts play <name> §7or §f/ts loop <name>"));
         return 1;
     }
 }
