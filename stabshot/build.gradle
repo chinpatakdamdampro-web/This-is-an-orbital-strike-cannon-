@@ -16,11 +16,10 @@ repositories {
     maven { url 'https://jitpack.io' }
 }
 
-configurations {
-    // 'embed' jars get unpacked into our output jar AND are on the compile classpath.
-    // We need this because Loom's include() does not work for JitPack artifacts.
-    embed
-    implementation.extendsFrom embed
+// Block LWJGL from being pulled in by ANY dependency — Minecraft already bundles it
+configurations.all {
+    exclude group: 'org.lwjgl'
+    exclude group: 'org.lwjgl.lwjgl'
 }
 
 dependencies {
@@ -29,34 +28,17 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    // JLayer — pure-Java MP3 decoder. On mavenCentral so include() works fine.
+    // JLayer — MP3 decoding
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // NewPipe Extractor.
-    // Exact JitPack coordinates (confirmed from https://jitpack.io/p/teamnewpipe/newpipeextractor):
-    //   groupId:    com.github.teamnewpipe
-    //   artifactId: newpipeextractor   (all lowercase)
-    //   version:    v0.26.3            (latest stable)
-    // NewPipe bundles Rhino, Gson, and jsoup inside its own jar, so no extra deps needed.
-    embed('com.github.teamnewpipe:newpipeextractor:v0.26.3')
-}
-
-jar {
-    // Unpack every jar in 'embed' and merge into our output jar.
-    from {
-        configurations.embed.collect { it.isDirectory() ? it : zipTree(it) }
+    // NewPipe Extractor — YouTube stream URL extraction
+    // We use it for compilation but only bundle the jar itself, not its transitives
+    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
+        transitive = false
     }
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-
-    // Strip any LWJGL classes that might have come in transitively — they would
-    // shadow Minecraft's own native binaries and cause NoSuchMethodError crashes.
-    exclude 'org/lwjgl/**'
-    exclude 'natives/**'
-    exclude '*.so'
-    exclude '*.dll'
-    exclude '*.dylib'
-
-    from("LICENSE") { rename { "${it}_${project.archives_base_name}" } }
+    include('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
+        transitive = false
+    }
 }
 
 processResources {
@@ -68,7 +50,7 @@ processResources {
 
 tasks.withType(JavaCompile).configureEach {
     it.options.encoding = "UTF-8"
-    it.options.release  = 21
+    it.options.release = 21
 }
 
 java {
