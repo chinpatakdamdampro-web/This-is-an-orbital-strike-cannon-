@@ -4,6 +4,7 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.pvpbot.stabshot.youtube.YtCommand;
+import com.pvpbot.stabshot.youtube.YtPlayer;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
@@ -24,34 +25,37 @@ public class ThemeSongCommand {
     }
 
     private static void registerDisk(CommandDispatcher<FabricClientCommandSource> dispatcher) {
-        // /ts play <song>  — play once
+        // /ts play <song>
         dispatcher.register(
             ClientCommandManager.literal("ts")
                 .then(ClientCommandManager.literal("play")
                     .then(ClientCommandManager.argument("song", StringArgumentType.greedyString())
                         .executes(ctx -> execPlay(ctx, false))))
         );
-
-        // /ts loop <song>  — loop (separate command avoids brigadier ambiguity)
+        // /ts loop <song>
         dispatcher.register(
             ClientCommandManager.literal("ts")
                 .then(ClientCommandManager.literal("loop")
                     .then(ClientCommandManager.argument("song", StringArgumentType.greedyString())
                         .executes(ctx -> execPlay(ctx, true))))
         );
-
         // /ts stop
         dispatcher.register(
             ClientCommandManager.literal("ts")
                 .then(ClientCommandManager.literal("stop")
                     .executes(ThemeSongCommand::execStop))
         );
-
         // /ts list
         dispatcher.register(
             ClientCommandManager.literal("ts")
                 .then(ClientCommandManager.literal("list")
                     .executes(ThemeSongCommand::execList))
+        );
+        // /ts debug — toggles verbose logging, off by default
+        dispatcher.register(
+            ClientCommandManager.literal("ts")
+                .then(ClientCommandManager.literal("debug")
+                    .executes(ThemeSongCommand::execDebug))
         );
     }
 
@@ -72,7 +76,7 @@ public class ThemeSongCommand {
             ctx.getSource().sendFeedback(Text.literal("§7No song is currently playing."));
             return 0;
         }
-        String  was       = ThemeSongPlayer.getCurrentSong();
+        String  was        = ThemeSongPlayer.getCurrentSong();
         boolean wasLooping = ThemeSongPlayer.isLooping();
         ThemeSongPlayer.stop();
         ctx.getSource().sendFeedback(Text.literal(
@@ -92,6 +96,17 @@ public class ThemeSongCommand {
         songs.forEach(s -> ctx.getSource().sendFeedback(Text.literal("§7 • §f" + s)));
         ctx.getSource().sendFeedback(Text.literal(
             "§7Usage: §f/ts play <name> §7or §f/ts loop <name>"));
+        return 1;
+    }
+
+    private static int execDebug(CommandContext<FabricClientCommandSource> ctx) {
+        // Toggle debug on both audio and YT systems
+        boolean newState = !ThemeSongPlayer.DEBUG;
+        ThemeSongPlayer.DEBUG = newState;
+        YtPlayer.DEBUG        = newState;
+        ctx.getSource().sendFeedback(Text.literal(
+            "§e[StabShot] Debug logging " + (newState ? "§aON" : "§cOFF") +
+            "§e. " + (newState ? "Check your game log for [StabShot/Audio] and [StabShot/YT] tags." : "")));
         return 1;
     }
 }
