@@ -16,12 +16,6 @@ repositories {
     maven { url 'https://jitpack.io' }
 }
 
-// Block LWJGL from being pulled in by ANY dependency — Minecraft already bundles it
-configurations.all {
-    exclude group: 'org.lwjgl'
-    exclude group: 'org.lwjgl.lwjgl'
-}
-
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     mappings  "net.fabricmc:yarn:${project.yarn_mappings}:v2"
@@ -31,11 +25,9 @@ dependencies {
     // JLayer — MP3 decoding
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // NewPipe Extractor — YouTube stream URL extraction
-    // We use it for compilation but only bundle the jar itself, not its transitives
-    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
-        transitive = false
-    }
+    // NewPipe — full transitives for compilation so imports resolve
+    // but only bundle the jar itself (transitive=false on include) to avoid conflicts
+    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8')
     include('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
         transitive = false
     }
