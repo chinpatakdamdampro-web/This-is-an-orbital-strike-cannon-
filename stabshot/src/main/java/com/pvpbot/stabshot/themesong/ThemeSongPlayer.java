@@ -23,6 +23,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class ThemeSongPlayer {
 
     public static final String SONGS_FOLDER = "stabshot/songs";
+    private static final String TAG = "[StabShot/Audio]";
+    public  static volatile boolean DEBUG = false;
 
     private static volatile String     currentSong;
     private static volatile boolean    playing  = false;
@@ -31,32 +33,41 @@ public class ThemeSongPlayer {
     private static volatile StabSoundInstance currentInstance;
     private static final AtomicBoolean loopActive = new AtomicBoolean(false);
 
-    private static final Identifier    DUMMY_ID    = Identifier.of("stabshot", "themesong");
-    private static final SoundEvent    DUMMY_EVENT = SoundEvent.of(DUMMY_ID);
+    private static final Identifier DUMMY_ID    = Identifier.of("stabshot", "themesong");
+    private static final SoundEvent DUMMY_EVENT = SoundEvent.of(DUMMY_ID);
 
     // -----------------------------------------------------------------------
     // Public API
     // -----------------------------------------------------------------------
 
     public static String play(final String name, final boolean loop) {
+        log("play() called: name=" + name + " loop=" + loop);
         stop();
+
         final Path songsDir = getSongsDir();
+        log("Songs dir: " + songsDir);
+
         Path   file = null;
         String ext  = null;
         for (String e : new String[]{"mp3", "ogg"}) {
             Path c = songsDir.resolve(name + "." + e);
+            log("Checking for file: " + c + " exists=" + Files.exists(c));
             if (Files.exists(c)) { file = c; ext = e; break; }
         }
         if (file == null) {
+            log("ERROR: Song file not found for: " + name);
             return "§cSong not found: §f" + name + ".ogg §7or §f" + name + ".mp3\n"
                  + "§7Put audio files in: §f" + songsDir + "\n"
                  + "§7Available: §f" + String.join(", ", getSongNames());
         }
+
+        log("Found file: " + file + " ext=" + ext);
         startPlayback(file, ext, name, loop);
         return null;
     }
 
     public static void playFile(final Path file) {
+        log("playFile() called: " + file);
         stop();
         String name = file.getFileName().toString();
         String ext  = name.endsWith(".ogg") ? "ogg" : "mp3";
@@ -64,17 +75,25 @@ public class ThemeSongPlayer {
     }
 
     public static void stop() {
+        log("stop() called — was playing=" + playing + " looping=" + looping);
         loopActive.set(false);
         playing = false;
         looping = false;
 
         Thread t = playThread;
-        if (t != null) { t.interrupt(); playThread = null; }
+        if (t != null) {
+            t.interrupt();
+            playThread = null;
+            log("Play thread interrupted");
+        }
 
         MinecraftClient client = MinecraftClient.getInstance();
         StabSoundInstance inst = currentInstance;
         if (inst != null && client != null) {
-            client.execute(() -> client.getSoundManager().stop(inst));
+            client.execute(() -> {
+                log("Stopping sound instance via SoundManager");
+                client.getSoundManager().stop(inst);
+            });
             currentInstance = null;
         }
         currentSong = null;
@@ -87,7 +106,10 @@ public class ThemeSongPlayer {
     public static List<String> getSongNames() {
         List<String> names = new ArrayList<>();
         Path dir = getSongsDir();
-        if (!Files.exists(dir)) return names;
+        if (!Files.exists(dir)) {
+            log("Songs directory does not exist: " + dir);
+            return names;
+        }
         File[] files = dir.toFile().listFiles(f -> {
             String n = f.getName().toLowerCase();
             return f.isFile() && (n.endsWith(".mp3") || n.endsWith(".ogg"));
@@ -104,8 +126,14 @@ public class ThemeSongPlayer {
 
     public static Path getSongsDir() {
         Path dir = FabricLoader.getInstance().getConfigDir().resolve(SONGS_FOLDER);
-        try { if (!Files.exists(dir)) Files.createDirectories(dir); }
-        catch (Exception ignored) {}
+        try {
+            if (!Files.exists(dir)) {
+                Files.createDirectories(dir);
+                log("Created songs directory: " + dir);
+            }
+        } catch (Exception e) {
+            log("ERROR: Could not create songs directory: " + e.getMessage());
+        }
         return dir;
     }
 
@@ -120,33 +148,56 @@ public class ThemeSongPlayer {
         playing     = true;
 
         playThread = new Thread(() -> {
+            log("Playback thread started for: " + songName);
             try {
                 MinecraftClient client = MinecraftClient.getInstance();
-                if (client == null) return;
+                if (client == null) {
+                    log("ERROR: MinecraftClient is null — cannot play audio");
+                    return;
+                }
                 do {
+                    log("Creating StabSoundInstance for: " + file);
                     StabSoundInstance inst = new StabSoundInstance(file, ext);
                     currentInstance = inst;
-                    // Play on main thread — SoundManager is not thread-safe
-                    client.execute(() -> client.getSoundManager().play(inst));
-                    // Wait for this instance to finish before looping
+
+                    log("Submitting to SoundManager on main thread...");
+                    client.execute(() -> {
+                        try {
+                            log("SoundManager.play() called");
+                            client.getSoundManager().play(inst);
+                            log("SoundManager.play() returned without exception");
+                        } catch (Exception e) {
+                            log("ERROR: SoundManager.play() threw: " + e.getClass().getName() + ": " + e.getMessage());
+                        }
+                    });
+
                     long durationMs = estimateDurationMs(file, ext);
+                    log("Estimated duration: " + durationMs + "ms");
                     if (durationMs <= 0) durationMs = 300_000L;
+
                     long deadline = System.currentTimeMillis() + durationMs + 2000L;
                     while (System.currentTimeMillis() < deadline
                             && loopActive.get()
                             && !Thread.currentThread().isInterrupted()) {
                         Thread.sleep(200);
                     }
+                    log("Playback wait finished. loopActive=" + loopActive.get() + " loop=" + loop);
                 } while (loop && loopActive.get() && !Thread.currentThread().isInterrupted());
             } catch (InterruptedException e) {
+                log("Playback thread interrupted (expected on stop)");
                 Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                log("ERROR in playback thread: " + e.getClass().getName() + ": " + e.getMessage());
+                e.printStackTrace();
             } finally {
                 playing = false;
                 if (!loopActive.get()) currentSong = null;
+                log("Playback thread finished");
             }
         }, "StabShot-PlayThread");
         playThread.setDaemon(true);
         playThread.start();
+        log("Play thread started");
     }
 
     private static long estimateDurationMs(Path file, String ext) {
@@ -155,23 +206,26 @@ public class ThemeSongPlayer {
                 try (InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
                     Bitstream bs = new Bitstream(in);
                     Header h = bs.readFrame();
-                    if (h == null) return 0;
+                    if (h == null) { log("WARN: Could not read MP3 header for duration estimate"); return 0; }
                     int bitrate = h.bitrate();
                     bs.closeFrame();
                     bs.close();
                     if (bitrate <= 0) return 0;
-                    return Files.size(file) * 8000L / bitrate;
+                    long size = Files.size(file);
+                    long dur  = size * 8000L / bitrate;
+                    log("MP3 duration estimate: " + dur + "ms (bitrate=" + bitrate + " size=" + size + ")");
+                    return dur;
                 }
             }
-            // OGG — rough estimate 4 minutes
             return 240_000L;
-        } catch (Exception e) { return 0; }
+        } catch (Exception e) {
+            log("WARN: Could not estimate duration: " + e.getMessage());
+            return 0;
+        }
     }
 
     // -----------------------------------------------------------------------
-    // Sound instance — uses Minecraft's sound engine correctly
-    // Uses MUSIC category + relative positioning so it's always audible
-    // regardless of where the player is in the world
+    // Sound instance
     // -----------------------------------------------------------------------
 
     @Environment(EnvType.CLIENT)
@@ -182,30 +236,33 @@ public class ThemeSongPlayer {
 
         StabSoundInstance(Path file, String ext) {
             super(DUMMY_EVENT, SoundCategory.MUSIC, Random.create());
-            this.file   = file;
-            this.ext    = ext;
-            // These settings make it play like Minecraft's background music:
-            // relative=true means position is relative to the listener (always audible)
-            // NONE attenuation means volume doesn't drop with distance
+            this.file            = file;
+            this.ext             = ext;
             this.relative        = true;
             this.attenuationType = SoundInstance.AttenuationType.NONE;
             this.volume          = 1.0f;
             this.pitch           = 1.0f;
             this.repeat          = false;
             this.repeatDelay     = 0;
-            // Position at 0,0,0 relative to listener
             this.x = 0; this.y = 0; this.z = 0;
+            log("StabSoundInstance created: " + file.getFileName() + " category=MUSIC relative=true attenuation=NONE");
         }
 
         @Override
         public CompletableFuture<AudioStream> getAudioStream(
                 SoundLoader loader, Identifier id, boolean repeatInstantly) {
+            log("getAudioStream() called for: " + file.getFileName());
             return CompletableFuture.supplyAsync(() -> {
                 try {
+                    log("Opening audio stream: " + file);
                     InputStream in = new BufferedInputStream(Files.newInputStream(file));
-                    if ("mp3".equals(ext)) return new Mp3AudioStream(in);
-                    else                   return new OggAudioStream(in);
+                    AudioStream stream = "mp3".equals(ext) ? new Mp3AudioStream(in) : new OggAudioStream(in);
+                    log("Audio stream opened successfully: " + stream.getClass().getSimpleName()
+                            + " format=" + stream.getFormat());
+                    return stream;
                 } catch (Exception e) {
+                    log("ERROR: Failed to open audio stream for " + file + ": "
+                            + e.getClass().getName() + ": " + e.getMessage());
                     throw new RuntimeException("Failed to open audio: " + file, e);
                 }
             });
@@ -213,7 +270,7 @@ public class ThemeSongPlayer {
     }
 
     // -----------------------------------------------------------------------
-    // MP3 decoder — JLayer → Minecraft AudioStream
+    // MP3 decoder
     // -----------------------------------------------------------------------
 
     @Environment(EnvType.CLIENT)
@@ -226,17 +283,22 @@ public class ThemeSongPlayer {
         private int     sampleRate  = 44100;
         private int     channels    = 2;
         private boolean headerRead  = false;
+        private int     framesDecoded = 0;
 
         Mp3AudioStream(InputStream in) {
             this.bitstream = new Bitstream(in);
             this.decoder   = new Decoder();
+            log("Mp3AudioStream created");
         }
 
         @Override
         public ByteBuffer read(int size) throws IOException {
             while (overflow.length - overflowPos < size && decode()) {}
             int avail    = overflow.length - overflowPos;
-            if (avail <= 0) return ByteBuffer.allocateDirect(0);
+            if (avail <= 0) {
+                log("Mp3AudioStream: end of stream after " + framesDecoded + " frames");
+                return ByteBuffer.allocateDirect(0);
+            }
             int toReturn = Math.min(size, avail);
             ByteBuffer buf = ByteBuffer.allocateDirect(toReturn);
             buf.put(overflow, overflowPos, toReturn);
@@ -253,6 +315,7 @@ public class ThemeSongPlayer {
                     sampleRate = header.frequency();
                     channels   = header.mode() == 3 ? 1 : 2;
                     headerRead = true;
+                    log("Mp3AudioStream first frame: sampleRate=" + sampleRate + " channels=" + channels);
                 }
                 SampleBuffer out   = (SampleBuffer) decoder.decodeFrame(header, bitstream);
                 short[]      pcm   = out.getBuffer();
@@ -268,12 +331,18 @@ public class ThemeSongPlayer {
                 overflow    = next;
                 overflowPos = 0;
                 bitstream.closeFrame();
+                framesDecoded++;
                 return true;
             } catch (BitstreamException e) {
-                if (e.getErrorCode() == BitstreamErrors.STREAM_EOF) return false;
-                throw new IOException("MP3 decode error", e);
+                if (e.getErrorCode() == BitstreamErrors.STREAM_EOF) {
+                    log("Mp3AudioStream: EOF after " + framesDecoded + " frames");
+                    return false;
+                }
+                log("ERROR: MP3 BitstreamException: " + e.getMessage());
+                throw new IOException("MP3 bitstream error", e);
             } catch (DecoderException e) {
-                throw new IOException("MP3 decode error", e);
+                log("ERROR: MP3 DecoderException: " + e.getMessage());
+                throw new IOException("MP3 decoder error", e);
             }
         }
 
@@ -285,7 +354,16 @@ public class ThemeSongPlayer {
 
         @Override
         public void close() throws IOException {
+            log("Mp3AudioStream closed after " + framesDecoded + " frames");
             try { bitstream.close(); } catch (BitstreamException ignored) {}
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Logging
+    // -----------------------------------------------------------------------
+
+    static void log(String msg) {
+        if (DEBUG) System.out.println(TAG + " " + msg);
     }
 }
