@@ -25,12 +25,18 @@ dependencies {
     // JLayer — MP3 decoding
     include(implementation('javazoom:jlayer:1.0.1'))
 
-    // NewPipe — full transitives for compilation so imports resolve
-    // but only bundle the jar itself (transitive=false on include) to avoid conflicts
-    implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8')
-    include('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
+    // NewPipe Extractor + all its required runtime dependencies
+    // Each one needs to be included separately so Fabric Loader bundles them
+    include(implementation('com.github.TeamNewPipe:NewPipeExtractor:v0.24.8') {
         transitive = false
-    }
+    })
+
+    // NewPipe runtime deps — required or YouTube extraction will crash
+    include(implementation('org.jsoup:jsoup:1.17.2'))              // HTML parsing
+    include(implementation('org.mozilla:rhino:1.7.15'))             // JS engine (YouTube sig decoding)
+    include(implementation('com.squareup.okhttp3:okhttp:4.12.0'))  // HTTP (NewPipe uses this internally)
+    include(implementation('com.squareup.okio:okio:3.6.0'))        // Required by OkHttp
+    include(implementation('com.google.code.gson:gson:2.10.1'))     // JSON parsing
 }
 
 processResources {
